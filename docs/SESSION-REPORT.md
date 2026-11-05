@@ -84,10 +84,20 @@ defect.
   render verified PDFs.
 - RLS is enforced by role switching and tenant settings, and fails closed.
 
+## Live provider check — 6 November 2026
+
+APInex (`https://api.apinex.bond/v1`) is configured from `.env`.
+`GET /v1/models` returned 200 with 42 model ids. The account is on the free plan
+(15 RPM) with a $0 balance: paid models such as `gpt-6.1-sol` returned 402
+insufficient balance. `free/gpt-6-luna` streamed `TALISMAN_OK` through Talisman's
+router and emitted a valid `create_task` tool call; `free/gemini-3.8-flash` is the
+configured fallback. This verifies live streaming, auth and tool calling, not a
+full agent task.
+
 ## Incomplete / not verified
 
-- **No live model or search keys were available.** Chat, `llm.answer` and SearX
-  search were exercised only through mocks/fixtures, not a real provider.
+- Live web search is unverified (`TALISMAN_SEARCH_URL` is unset); only free-tier
+  models are usable until the APInex balance is topped up.
 - The E2E pages are local fixtures; no live internet research was run.
 - OpenBot web/mobile apps, Docker computer, Gmail/Calendar, MCP/Composio, goals and
   monitors, credential encryption, semantic memory and AG-UI are vendored or
@@ -99,7 +109,8 @@ defect.
 
 ## Blockers
 
-- No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` or `TALISMAN_SEARCH_URL`.
+- Paid APInex models need a balance top-up; only free-tier models work today.
+- No `TALISMAN_SEARCH_URL` is configured yet.
 - The machine is memory-constrained (3.8 GB); concurrent Postgres clusters are not
   viable, hence serial tests and a shared server.
 - No Docker on this host, so computer execution could not be exercised.
@@ -107,6 +118,7 @@ defect.
 
 ## Exact next task
 
-Set one real model key and a SearX endpoint, run a live research task against
-public pages, and fix the first real provider/search failure. Before storing real
-credentials, add encryption at rest for the credentials table.
+Keep the APInex free model (or top up for a paid one), set `TALISMAN_SEARCH_URL`,
+run a live research task against public pages, and fix the first real
+provider/search failure. Before storing real credentials in the database, add
+encryption at rest for the credentials table.

@@ -98,8 +98,9 @@ external server is available. CI supplies a Postgres service and Chrome.
 Verified on 5 November 2026: `tsc --noEmit` clean, and **19/19 tests pass** on
 Node 26 with real Postgres and host Chrome, including tenant isolation, approvals,
 pause/resume/cancel, API scoping and a real-browser research run producing a
-verified PDF. That run used fixture pages and a mock model; live providers and
-search were not exercised for lack of keys. Details and gaps are in
+verified PDF. The end-to-end run used fixture pages and a mock model; a separate
+live APInex check confirmed streaming chat and tool calls on the free tier, but
+live search and a full live research run are still pending. Details and gaps are in
 [`docs/SESSION-REPORT.md`](docs/SESSION-REPORT.md).
 
 ## Security posture
