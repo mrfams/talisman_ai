@@ -7,7 +7,9 @@ import { AuthService } from "../auth/service.js";
 import { createModelRouter } from "../intelligence/factory.js";
 import { ArtifactStore } from "../workspace/workspace.js";
 import { createApp } from "./app.js";
+import { loadLocalEnv } from "../core/env.js";
 
+loadLocalEnv();
 const config = loadConfig();
 const opened = await openDatabase(config);
 const { database, kind } = opened;

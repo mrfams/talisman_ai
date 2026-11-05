@@ -7,7 +7,9 @@ import { TaskEngine } from "../runtime/engine.js";
 import { defaultHandlers } from "../runtime/handlers.js";
 import { ArtifactStore } from "../workspace/workspace.js";
 import { PlaywrightBrowser } from "../browser/playwright.js";
+import { loadLocalEnv } from "../core/env.js";
 
+loadLocalEnv();
 const config = loadConfig();
 const opened = await openDatabase(config);
 const { database, kind } = opened;

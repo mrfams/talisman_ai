@@ -3,7 +3,9 @@ import { loadConfig } from "../core/config.js";
 import { log } from "../core/log.js";
 import { Database } from "./database.js";
 import { applySchema } from "./migrate.js";
+import { loadLocalEnv } from "../core/env.js";
 
+loadLocalEnv();
 const config = loadConfig();
 const url = config.databaseUrl;
 if (!url) {

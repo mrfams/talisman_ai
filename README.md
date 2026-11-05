@@ -37,6 +37,7 @@ Requirements: Node 22+ and (for the browser worker) Google Chrome.
 ```bash
 cp .env.example .env
 # Set SESSION_SECRET (32+ chars). DATABASE_URL is optional for local dev.
+# `.env` is loaded automatically by the API, worker and migrate commands.
 npm install
 npm run migrate        # only needed with DATABASE_URL
 npm start              # API + console on http://localhost:3000
