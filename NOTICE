@@ -1,0 +1,26 @@
+Talisman includes source from the following MIT-licensed projects.
+Each vendored tree retains its own LICENSE file.
+
+1. OpenBot — https://github.com/CopilotKit/openbot
+   Copyright (c) 2026 CopilotKit
+   Location: vendor/openbot
+   Pinned at commit 86a0a469f0204e2ead83256cad76d7411478d754 (2026-11-05 clone).
+   Provides: server, web/mobile/desktop apps, approval boundary, audit trail,
+   per-Bot computer supervisor, browser/computer infrastructure, channels.
+
+2. OpenDuet — https://github.com/CopilotKit/OpenDuet
+   Copyright (c) 2026 CopilotKit
+   Location: vendor/openduet
+   OpenDuet is a tenant package and product layer on OpenBot. Its vendored
+   `openbot/` directory is intentionally NOT duplicated here; vendor/openbot is
+   the canonical copy. Only OpenDuet's tenant package, scripts, evals and docs
+   are vendored.
+
+3. OpenMuse — https://github.com/CopilotKit/OpenMuse
+   Copyright (c) 2026 OpenMuse contributors
+   Location: vendor/openmuse
+   Provides: task lifecycle and leasing worker, approvals, memory, goals and
+   monitors, browser worker, PDF workflows, Google integrations, MCP client.
+
+Modifications to vendored code, if any, are recorded in docs/DECISIONS.md and
+carry the same MIT terms. Talisman's own code is MIT licensed (see LICENSE).

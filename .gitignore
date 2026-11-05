@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+.data/
+coverage/
+*.log
+vendor/**/node_modules/
+vendor/**/dist/
+vendor/**/.env
