@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Talisman</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1014; --panel:#171a21; --line:#262b35; --text:#e6e8ee; --muted:#98a0b3; --accent:#8b7bff; --ok:#4fd1a1; --warn:#ffb454; --bad:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; letter-spacing:.02em; }
+  main { max-width:1100px; margin:0 auto; padding:24px; display:grid; gap:20px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; }
+  h2 { font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px; }
+  input, textarea, button { font:inherit; }
+  input, textarea { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:#0f1218; color:var(--text); margin-bottom:8px; }
+  textarea { min-height:90px; resize:vertical; }
+  button { padding:9px 14px; border-radius:8px; border:1px solid var(--line); background:#20242e; color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#0b0b12; font-weight:600; }
+  button:hover { filter:brightness(1.1); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:13px; }
+  .err { color:var(--bad); font-size:13px; }
+  .task { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; cursor:pointer; }
+  .task:hover { border-color:var(--accent); }
+  .task h3 { font-size:14px; margin:0 0 6px; }
+  .bar { height:6px; background:#0f1218; border-radius:99px; overflow:hidden; margin:8px 0; }
+  .bar > div { height:100%; background:var(--accent); transition:width .4s; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .pill.succeeded { color:var(--ok); border-color:var(--ok); }
+  .pill.failed, .pill.cancelled { color:var(--bad); border-color:var(--bad); }
+  .pill.waiting_approval { color:var(--warn); border-color:var(--warn); }
+  #events { font:12px/1.6 ui-monospace, monospace; max-height:360px; overflow:auto; background:#0f1218; border-radius:8px; padding:10px; white-space:pre-wrap; }
+  .hidden { display:none !important; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Talisman</h1>
+  <div class="row">
+    <span id="who" class="muted"></span>
+    <button id="logout" class="hidden">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <section id="auth-panel">
+    <h2>Sign in or create a workspace</h2>
+    <input id="email" type="email" placeholder="Email" autocomplete="email" />
+    <input id="password" type="password" placeholder="Password (12+ characters)" autocomplete="current-password" />
+    <input id="orgName" placeholder="Organisation name (signup only)" />
+    <div class="row">
+      <button class="primary" id="login">Sign in</button>
+      <button id="signup">Create account</button>
+    </div>
+    <p class="err" id="auth-error"></p>
+  </section>
+
+  <section id="app" class="hidden">
+    <h2>New task</h2>
+    <textarea id="goal" placeholder="Ask Talisman to research something and prepare a document. Include URLs to start from."></textarea>
+    <input id="seeds" placeholder="Optional seed URLs, comma separated" />
+    <button class="primary" id="create">Start task</button>
+    <p class="err" id="task-error"></p>
+
+    <h2 style="margin-top:20px">Tasks</h2>
+    <div id="tasks" class="muted">Loading…</div>
+  </section>
+
+  <section id="detail" class="hidden">
+    <h2>Task</h2>
+    <div id="task-title"></div>
+    <div id="task-meta" class="muted" style="margin:6px 0"></div>
+    <div class="bar"><div id="task-progress" style="width:0%"></div></div>
+    <div class="row" id="task-actions" style="margin:10px 0"></div>
+    <div id="approvals"></div>
+    <div id="artifacts"></div>
+    <h2 style="margin-top:16px">Execution history</h2>
+    <div id="events"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let currentTask = null;
+let stream = null;
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "content-type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function boot() {
+  try {
+    const { user } = await api("/api/me");
+    signedIn(user);
+  } catch {
+    $("auth-panel").classList.remove("hidden");
+  }
+}
+
+function signedIn(user) {
+  $("auth-panel").classList.add("hidden");
+  $("app").classList.remove("hidden");
+  $("who").textContent = `${user.email} · ${user.orgId.slice(0, 8)}`;
+  $("logout").classList.remove("hidden");
+  loadTasks();
+}
+
+$("login").onclick = () => auth("login");
+$("signup").onclick = () => auth("signup");
+async function auth(kind) {
+  $("auth-error").textContent = "";
+  try {
+    const body = { email: $("email").value, password: $("password").value };
+    if (kind === "signup") body.orgName = $("orgName").value;
+    const result = await api(`/api/auth/${kind}`, { method: "POST", body: JSON.stringify(body) });
+    signedIn(result.user);
+  } catch (error) {
+    $("auth-error").textContent = error.message;
+  }
+}
+
+$("logout").onclick = async () => {
+  await api("/api/auth/logout", { method: "POST" });
+  location.reload();
+};
+
+$("create").onclick = async () => {
+  $("task-error").textContent = "";
+  const goal = $("goal").value.trim();
+  if (!goal) return;
+  try {
+    const seeds = $("seeds").value.split(",").map((s) => s.trim()).filter(Boolean);
+    const { task } = await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ goal, seedUrls: seeds.length ? seeds : undefined }),
+    });
+    $("goal").value = "";
+    $("seeds").value = "";
+    await loadTasks();
+    openTask(task.id);
+  } catch (error) {
+    $("task-error").textContent = error.message;
+  }
+};
+
+async function loadTasks() {
+  try {
+    const { tasks } = await api("/api/tasks");
+    if (!tasks.length) { $("tasks").textContent = "No tasks yet."; return; }
+    $("tasks").innerHTML = "";
+    for (const task of tasks) {
+      const element = document.createElement("div");
+      element.className = "task";
+      element.innerHTML = `<h3>${escapeHtml(task.title)}</h3>
+        <div class="row"><span class="pill ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
+        <span class="muted">${task.progress}%</span></div>
+        <div class="bar"><div style="width:${task.progress}%"></div></div>`;
+      element.onclick = () => openTask(task.id);
+      $("tasks").appendChild(element);
+    }
+  } catch (error) {
+    $("tasks").textContent = error.message;
+  }
+}
+
+async function openTask(id) {
+  currentTask = id;
+  if (stream) { stream.close(); stream = null; }
+  $("detail").classList.remove("hidden");
+  $("events").textContent = "";
+  await refreshTask();
+  stream = new EventSource(`/api/tasks/${id}/events`);
+  stream.addEventListener("task", async (event) => {
+    const data = JSON.parse(event.data);
+    $("events").textContent += `[${data.kind}] ${data.title}${data.detail ? " — " + data.detail : ""}\n`;
+    $("events").scrollTop = $("events").scrollHeight;
+    if (["status", "step", "approval", "artifact", "done", "error"].includes(data.kind)) {
+      await refreshTask();
+    }
+  });
+  stream.addEventListener("end", () => { if (stream) { stream.close(); stream = null; } loadTasks(); });
+}
+
+async function refreshTask() {
+  if (!currentTask) return;
+  const detail = await api(`/api/tasks/${currentTask}`);
+  const task = detail.task;
+  $("task-title").textContent = task.title;
+  $("task-meta").innerHTML = `<span class="pill ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span>
+    · ${task.progress}% · attempts ${task.attempts}/${task.maxAttempts}
+    ${task.error ? `<div class="err">${escapeHtml(task.error)}</div>` : ""}`;
+  $("task-progress").style.width = `${task.progress}%`;
+
+  const actions = [];
+  if (["queued", "running", "waiting_approval"].includes(task.status)) actions.push(["Pause", "pause"]);
+  if (task.status === "paused") actions.push(["Resume", "resume"]);
+  if (!["succeeded", "failed", "cancelled"].includes(task.status)) actions.push(["Cancel", "cancel"]);
+  if (["failed", "cancelled"].includes(task.status)) actions.push(["Retry", "retry"]);
+  $("task-actions").innerHTML = "";
+  for (const [label, action] of actions) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.onclick = async () => {
+      await api(`/api/tasks/${task.id}/${action}`, { method: "POST" });
+      await refreshTask();
+      await loadTasks();
+    };
+    $("task-actions").appendChild(button);
+  }
+
+  $("approvals").innerHTML = "";
+  for (const approval of detail.approvals.filter((entry) => entry.status === "pending")) {
+    const element = document.createElement("div");
+    element.className = "task";
+    element.innerHTML = `<strong>Approval needed</strong><div class="muted">${escapeHtml(approval.summary)}</div>`;
+    const row = document.createElement("div");
+    row.className = "row";
+    for (const [label, decision] of [["Approve", "approved"], ["Deny", "denied"]]) {
+      const button = document.createElement("button");
+      button.textContent = label;
+      button.onclick = async () => {
+        await api(`/api/approvals/${approval.id}/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision }),
+        });
+        await refreshTask();
+      };
+      row.appendChild(button);
+    }
+    element.appendChild(row);
+    $("approvals").appendChild(element);
+  }
+
+  $("artifacts").innerHTML = "";
+  for (const artifact of detail.artifacts) {
+    const link = document.createElement("a");
+    link.href = `/api/artifacts/${artifact.id}`;
+    link.textContent = `Download ${artifact.name} (${Math.round(artifact.sizeBytes / 1024)} KB)`;
+    const wrapper = document.createElement("div");
+    wrapper.style.margin = "8px 0";
+    wrapper.appendChild(link);
+    $("artifacts").appendChild(wrapper);
+  }
+}
+
+boot();
+setInterval(() => { if ($("app").classList.contains("hidden") === false && !currentTask) loadTasks(); }, 5000);
+</script>
+</body>
+</html>

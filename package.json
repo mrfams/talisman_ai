@@ -1,0 +1,36 @@
+{
+  "name": "talisman",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/api/server.ts",
+    "start": "tsx src/api/server.ts",
+    "worker": "tsx src/worker/main.ts",
+    "migrate": "tsx src/db/migrate-cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test:unit": "tsx --test --test-concurrency=1 tests/intelligence.test.ts tests/auth.test.ts tests/runtime.test.ts tests/db.test.ts tests/api.test.ts",
+    "test:browser": "tsx --test --test-concurrency=1 tests/browser.smoke.test.ts",
+    "test:e2e": "tsx --test --test-concurrency=1 tests/e2e.research.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.6",
+    "embedded-postgres": "^18.6.0-beta.19",
+    "hono": "^4.10.0",
+    "pdf-lib": "^1.17.1",
+    "pg": "^8.16.3",
+    "playwright-core": "^1.56.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2"
+  }
+}

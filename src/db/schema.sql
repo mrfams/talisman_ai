@@ -1,0 +1,221 @@
+-- Talisman core schema.
+-- Tenant tables are protected by row level security. Auth tables (orgs, users,
+-- memberships, sessions) are intentionally outside RLS because they are read
+-- before an organisation context exists; they are only accessed by the auth
+-- service with explicit predicates.
+
+CREATE TABLE IF NOT EXISTS orgs (
+  id text PRIMARY KEY,
+  name text NOT NULL,
+  slug text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id text PRIMARY KEY,
+  email text NOT NULL UNIQUE,
+  name text,
+  password_hash text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS memberships (
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role text NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id text PRIMARY KEY,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS conversations_org_user_idx ON conversations (org_id, user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role text NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
+  content jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages (conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id text REFERENCES conversations(id) ON DELETE SET NULL,
+  title text NOT NULL,
+  goal text NOT NULL,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','scheduled','running','waiting_approval','paused','succeeded','failed','cancelled')),
+  plan jsonb,
+  progress integer NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 100),
+  error text,
+  result jsonb,
+  attempts integer NOT NULL DEFAULT 0,
+  max_attempts integer NOT NULL DEFAULT 3,
+  run_after timestamptz,
+  lease_owner text,
+  lease_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  finished_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS tasks_org_user_idx ON tasks (org_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS tasks_poll_idx ON tasks (status, run_after, lease_until);
+
+CREATE TABLE IF NOT EXISTS task_steps (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  position integer NOT NULL,
+  title text NOT NULL,
+  kind text NOT NULL,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','running','waiting_approval','succeeded','failed','skipped','cancelled')),
+  input jsonb,
+  output jsonb,
+  error text,
+  started_at timestamptz,
+  finished_at timestamptz,
+  UNIQUE (task_id, position)
+);
+CREATE INDEX IF NOT EXISTS task_steps_task_idx ON task_steps (task_id, position);
+
+CREATE TABLE IF NOT EXISTS task_events (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seq bigserial NOT NULL,
+  kind text NOT NULL,
+  title text NOT NULL,
+  detail text,
+  data jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS task_events_task_idx ON task_events (task_id, seq);
+
+CREATE TABLE IF NOT EXISTS approvals (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  task_id text NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  step_id text,
+  kind text NOT NULL,
+  summary text NOT NULL,
+  payload jsonb,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','approved','denied','expired')),
+  decided_by text REFERENCES users(id) ON DELETE SET NULL,
+  decided_at timestamptz,
+  expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS approvals_task_idx ON approvals (task_id, created_at);
+CREATE INDEX IF NOT EXISTS approvals_pending_idx ON approvals (status, expires_at);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  task_id text REFERENCES tasks(id) ON DELETE SET NULL,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  mime text NOT NULL,
+  size_bytes bigint NOT NULL,
+  sha256 text NOT NULL,
+  storage_path text NOT NULL,
+  metadata jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts (task_id);
+CREATE INDEX IF NOT EXISTS artifacts_org_idx ON artifacts (org_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  content text NOT NULL,
+  source text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS memories_org_user_idx ON memories (org_id, user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  actor_user_id text,
+  event_type text NOT NULL,
+  target_type text NOT NULL,
+  target_id text,
+  payload jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_org_idx ON audit_events (org_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  label text NOT NULL,
+  ciphertext text NOT NULL,
+  iv text NOT NULL,
+  tag text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (org_id, provider, label)
+);
+
+-- Row level security for every tenant table. Missing context => no rows.
+DO $$
+DECLARE
+  t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'conversations','messages','tasks','task_steps','task_events',
+    'approvals','artifacts','memories','audit_events','provider_credentials'
+  ]
+  LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+    EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+    EXECUTE format(
+      'CREATE POLICY tenant_isolation ON %I USING (org_id = current_setting(''talisman.org_id'', true)) WITH CHECK (org_id = current_setting(''talisman.org_id'', true))',
+      t
+    );
+  END LOOP;
+END $$;
+
+-- A non-superuser application role. Talisman switches to it inside every tenant
+-- transaction (SET LOCAL ROLE), so RLS applies even when the connected role owns
+-- the tables. Without this, a table owner bypasses its own policies.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'talisman_app') THEN
+    CREATE ROLE talisman_app NOLOGIN;
+  END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA public TO talisman_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO talisman_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO talisman_app;
