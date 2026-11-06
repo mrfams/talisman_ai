@@ -168,6 +168,44 @@ const run = async () => {
     unconnected.status === 409 || unconnected.status === 503,
     `HTTP ${unconnected.status}`,
   );
+
+  const artifacts = await call("/api/artifacts", { cookie: alice.cookie });
+  record(
+    "artifact library lists the produced file",
+    artifacts.status === 200 && (artifacts.json?.artifacts?.length ?? 0) > 0,
+    `${artifacts.json?.artifacts?.length ?? 0} artifact(s)`,
+  );
+
+  const approvals = await call("/api/approvals", { cookie: alice.cookie });
+  record(
+    "approvals inbox answers",
+    approvals.status === 200 && Array.isArray(approvals.json?.approvals),
+    `HTTP ${approvals.status}`,
+  );
+
+  const activity = await call("/api/activity", { cookie: alice.cookie });
+  record(
+    "audit log answers for an owner",
+    activity.status === 200 && (activity.json?.events?.length ?? 0) > 0,
+    `${activity.json?.events?.length ?? 0} event(s)`,
+  );
+
+  const team = await call("/api/team", { cookie: alice.cookie });
+  record(
+    "team lists the owner",
+    (team.json?.members?.length ?? 0) >= 1,
+    `${team.json?.members?.length ?? 0} member(s)`,
+  );
+
+  const shell = await fetch(`${base}/chat`, { headers: { accept: "text/html" } });
+  const shellHtml = await shell.text();
+  record(
+    "app shell is served on a client route",
+    shell.status === 200 &&
+      shellHtml.includes('<div id="root">') &&
+      /assets\/index-[^"]+\.js/.test(shellHtml),
+    `HTTP ${shell.status}, ${shellHtml.length} bytes`,
+  );
 };
 
 try {

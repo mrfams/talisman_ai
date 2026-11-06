@@ -19,10 +19,14 @@ import {
   getConversation,
   getTask,
   listApprovals,
+  listApprovalsForUser,
   listArtifacts,
+  listArtifactsForUser,
+  listAuditEvents,
   listConversations,
   listEvents,
   listMemories,
+  listMembers,
   listMessages,
   listOrgIds,
   listSteps,
@@ -274,6 +278,47 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   app.get("/api/me", (c) => c.json({ user: requireUser(c).user }));
+
+  /* ------------------------------------------------------------ libraries */
+
+  app.get("/api/artifacts", async (c) => {
+    const { user } = requireUser(c);
+    const limit = Math.min(Number(c.req.query("limit") ?? 100) || 100, 200);
+    const artifacts = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      listArtifactsForUser(conn, user.id, limit),
+    );
+    return c.json({ artifacts });
+  });
+
+  app.get("/api/approvals", async (c) => {
+    const { user } = requireUser(c);
+    const status = c.req.query("status") ?? "pending";
+    if (!["pending", "approved", "denied", "expired", "all"].includes(status)) {
+      throw errors.invalid("Unknown approval status");
+    }
+    const approvals = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      listApprovalsForUser(conn, user.id, status as "pending", 100),
+    );
+    return c.json({ approvals });
+  });
+
+  app.get("/api/activity", async (c) => {
+    const { user } = requireUser(c);
+    if (user.role === "member") throw errors.forbidden("Only owners and admins can read the audit log");
+    const limit = Math.min(Number(c.req.query("limit") ?? 100) || 100, 200);
+    const events = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      listAuditEvents(conn, user.orgId, limit),
+    );
+    return c.json({ events });
+  });
+
+  app.get("/api/team", async (c) => {
+    const { user } = requireUser(c);
+    const members = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      listMembers(conn, user.orgId),
+    );
+    return c.json({ members });
+  });
 
   /* ------------------------------------------------------- conversations */
 

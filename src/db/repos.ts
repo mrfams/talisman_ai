@@ -815,6 +815,100 @@ export async function recordAudit(
   );
 }
 
+export async function listArtifactsForUser(
+  conn: Conn,
+  userId: string,
+  limit = 100,
+): Promise<Artifact[]> {
+  const { rows } = await conn.query<Row>(
+    "SELECT * FROM artifacts WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+    [userId, limit],
+  );
+  return rows.map(mapArtifact);
+}
+
+/* --------------------------------------------------------------- approvals */
+
+export interface ApprovalWithTask extends Approval {
+  taskTitle: string;
+}
+
+export async function listApprovalsForUser(
+  conn: Conn,
+  userId: string,
+  status: ApprovalStatus | "all" = "pending",
+  limit = 100,
+): Promise<ApprovalWithTask[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT a.*, t.title AS task_title
+       FROM approvals a
+       JOIN tasks t ON t.id = a.task_id
+      WHERE t.user_id = $1 AND ($2 = 'all' OR a.status = $2)
+      ORDER BY a.created_at DESC LIMIT $3`,
+    [userId, status, limit],
+  );
+  return rows.map((row) => ({ ...mapApproval(row), taskTitle: String(row.task_title) }));
+}
+
+/* ------------------------------------------------------------------ audit */
+
+export interface AuditEntry {
+  id: string;
+  actorUserId: string | null;
+  eventType: string;
+  targetType: string;
+  targetId: string | null;
+  payload: unknown;
+  createdAt: string;
+}
+
+export async function listAuditEvents(
+  conn: Conn,
+  orgId: string,
+  limit = 100,
+): Promise<AuditEntry[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT id, actor_user_id, event_type, target_type, target_id, payload, created_at
+       FROM audit_events WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2`,
+    [orgId, limit],
+  );
+  return rows.map((row) => ({
+    id: String(row.id),
+    actorUserId: row.actor_user_id === null ? null : String(row.actor_user_id),
+    eventType: String(row.event_type),
+    targetType: String(row.target_type),
+    targetId: row.target_id === null ? null : String(row.target_id),
+    payload: row.payload ?? null,
+    createdAt: iso(row.created_at),
+  }));
+}
+
+/* ---------------------------------------------------------------- members */
+
+export interface Member {
+  userId: string;
+  email: string;
+  name: string | null;
+  role: Role;
+  createdAt: string;
+}
+
+export async function listMembers(conn: Conn, orgId: string): Promise<Member[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT m.user_id, u.email, u.name, m.role, m.created_at
+       FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.org_id = $1 ORDER BY m.created_at`,
+    [orgId],
+  );
+  return rows.map((row) => ({
+    userId: String(row.user_id),
+    email: String(row.email),
+    name: row.name === null ? null : String(row.name),
+    role: String(row.role) as Role,
+    createdAt: iso(row.created_at),
+  }));
+}
+
 /* ------------------------------------------------------------ credentials */
 
 export async function putCredential(

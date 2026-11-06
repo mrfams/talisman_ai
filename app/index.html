@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="Talisman — an agent that keeps working after you close the tab." />
+    <title>Talisman</title>
+    <script>
+      // Theme before first paint: no flash, and an explicit choice wins over the OS.
+      (function () {
+        try {
+          var saved = localStorage.getItem("talisman.theme");
+          var os = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.dataset.theme = saved === "light" || saved === "dark" ? saved : os;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>Talisman needs JavaScript to run. The API is still available at /api/health.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

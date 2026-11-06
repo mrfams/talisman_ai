@@ -22,5 +22,18 @@ Each vendored tree retains its own LICENSE file.
    Provides: task lifecycle and leasing worker, approvals, memory, goals and
    monitors, browser worker, PDF workflows, Google integrations, MCP client.
 
+4. Phone Harness — https://github.com/phone-harness/phone-harness
+   Copyright (c) 2026 shawn pana
+   Location: vendor/phone-harness
+   Pinned at commit 4bebff1 (2026-11-06 clone). MIT.
+   Provides: phone transport (iPhone Mirroring + Apple Vision OCR, Android adb,
+   cloud phones over adb/HTTPS), the op vocabulary, OCR helpers and the CLI.
+   Talisman does not modify this tree; it drives it through its CLI, its bridge
+   and its cloud API. See docs/PHONE-HARNESS.md.
+
 Modifications to vendored code, if any, are recorded in docs/DECISIONS.md and
 carry the same MIT terms. Talisman's own code is MIT licensed (see LICENSE).
+
+Study-only references, cloned locally and not redistributed: OpenDots
+(https://github.com/CopilotKit/OpenDots, MIT, commit d4214af) and OpenMuse's
+mobile/desktop surfaces. They inform the interface; no code from them ships.

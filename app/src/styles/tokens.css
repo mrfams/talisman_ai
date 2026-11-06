@@ -1,0 +1,129 @@
+/* Talisman design tokens. One palette, two themes, no page invents its own values. */
+
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("/fonts/instrument-sans-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 15px;
+  --text-lg: 17px;
+  --text-xl: 21px;
+  --text-2xl: 26px;
+  --text-3xl: 34px;
+  --text-4xl: 46px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 56px;
+  --space-10: 72px;
+
+  --r-1: 8px;
+  --r-2: 12px;
+  --r-3: 16px;
+  --r-4: 22px;
+  --r-pill: 999px;
+
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --t-fast: 120ms;
+  --t-base: 180ms;
+  --t-slow: 260ms;
+
+  --rail: 244px;
+  --measure: 66ch;
+  --z-rail: 30;
+  --z-sheet: 60;
+  --z-palette: 70;
+  --focus: 0 0 0 2px var(--canvas), 0 0 0 4px var(--focus-ring);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #121016;
+  --canvas-2: #0d0b11;
+  --surface: #191720;
+  --surface-2: #211e2b;
+  --surface-3: #2a2635;
+  --line: #2c2737;
+  --line-strong: #3a3448;
+  --text: #eceaf3;
+  --text-soft: #c9c4d6;
+  --muted: #9891a7;
+  --faint: #6f687d;
+  --accent: #8b93f7;
+  --accent-strong: #a3a9ff;
+  --accent-ink: #14121a;
+  --accent-soft: rgba(139, 147, 247, 0.14);
+  --mint: #23d5a2;
+  --mint-soft: rgba(35, 213, 162, 0.14);
+  --lilac: #bec2ff;
+  --plum: #35295f;
+  --ok: #3dd68c;
+  --warn: #f0b45e;
+  --bad: #f2777a;
+  --info: #7fb6f4;
+  --focus-ring: rgba(139, 147, 247, 0.55);
+  --shadow-sheet: 0 24px 80px rgba(0, 0, 0, 0.55);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03);
+  --dither-a: rgba(190, 194, 255, 0.22);
+  --dither-b: rgba(35, 213, 162, 0.16);
+  --code-bg: #14121a;
+  --scrim: rgba(8, 6, 12, 0.62);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --canvas: #f8f7fb;
+  --canvas-2: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f3f1f9;
+  --surface-3: #ebe8f4;
+  --line: #e5e1ee;
+  --line-strong: #d3cee2;
+  --text: #1b1723;
+  --text-soft: #3f384e;
+  --muted: #6b6479;
+  --faint: #948da3;
+  --accent: #5a63d8;
+  --accent-strong: #4a52c9;
+  --accent-ink: #ffffff;
+  --accent-soft: rgba(90, 99, 216, 0.1);
+  --mint: #0f9c76;
+  --mint-soft: rgba(15, 156, 118, 0.1);
+  --lilac: #5a63d8;
+  --plum: #35295f;
+  --ok: #178a5b;
+  --warn: #9a6212;
+  --bad: #b3393f;
+  --info: #1f6fb2;
+  --focus-ring: rgba(90, 99, 216, 0.45);
+  --shadow-sheet: 0 24px 80px rgba(34, 24, 60, 0.18);
+  --shadow-card: 0 1px 2px rgba(34, 24, 60, 0.04);
+  --dither-a: rgba(90, 99, 216, 0.2);
+  --dither-b: rgba(15, 156, 118, 0.16);
+  --code-bg: #f2f0f8;
+  --scrim: rgba(24, 18, 34, 0.32);
+}

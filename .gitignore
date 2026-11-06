@@ -11,3 +11,7 @@ vendor/**/.env
 
 .vercel
 .env*
+
+# Build output and study-only reference clones
+app/dist/
+vendor/opendots/
