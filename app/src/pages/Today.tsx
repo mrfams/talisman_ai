@@ -1,5 +1,14 @@
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowUpRight, CheckCircle2, Clock, Package, Phone, Plug, Sparkles } from "lucide-react";
+import {
+  ArrowUpRight,
+  CheckCircle2,
+  Clock,
+  ListChecks,
+  Package,
+  Phone,
+  Plug,
+  Sparkles,
+} from "lucide-react";
 import { useConnectors, useHealth, useMe, useTasks } from "../lib/queries";
 import { Badge, Button, Card, Empty, Skeleton, StatusBadge, timeAgo } from "../ui";
 
@@ -7,8 +16,13 @@ const PROMPTS = [
   "Research a company and write me a one-page brief",
   "Read my calendar tomorrow and tell me what I am walking into",
   "Find the cheapest option for something I need to buy",
-  "Summarise a long thread and draft the reply",
 ];
+
+const START = [
+  ["Give it a job", "Describe the outcome, not the clicks. It turns the job into a plan."],
+  ["Watch the run", "Every step, retry and tool call is visible while it works."],
+  ["Approve the risky bits", "Sends, payments and deletes wait for your decision."],
+] as const;
 
 function greeting(): string {
   const hour = new Date().getHours();
@@ -33,47 +47,55 @@ export function Today() {
     (task) => task.status === "succeeded" && new Date(task.updatedAt).getTime() > week,
   );
 
-  const firstName = (me.data?.user.name ?? me.data?.user.email ?? "").split(/[@\s]/)[0] ?? "";
+  // An email handle is not a name: greet plainly rather than showing "shot-1793…".
+  const firstName = (me.data?.user.name ?? "").trim().split(/\s+/)[0] ?? "";
   const google = connectors.data?.connectors.find((connector) => connector.id === "google");
 
   return (
     <div className="page">
       <section className="hero">
-        <span className="hero-band dither" aria-hidden />
-        <div className="stack" style={{ gap: "var(--space-4)", position: "relative" }}>
-          <span className="badge" data-tone="plain">
-            <Sparkles size={11} aria-hidden />
-            {new Date().toLocaleDateString(undefined, {
-              weekday: "long",
-              month: "long",
-              day: "numeric",
-            })}
-          </span>
+        <span className="hero-grain dither" aria-hidden />
+        <div className="hero-inner">
+          <div className="row wrap" style={{ gap: 10 }}>
+            <span className="eyebrow">
+              {new Date().toLocaleDateString(undefined, {
+                weekday: "long",
+                month: "long",
+                day: "numeric",
+              })}
+            </span>
+            <Badge tone={inFlight.length ? "live" : "plain"}>
+              {inFlight.length ? `${inFlight.length} running` : "Agent idle"}
+            </Badge>
+          </div>
+
           <h1 className="hero-title">
             {greeting()}
-            {firstName ? `, ${firstName}` : ""}. What should I take off your plate?
+            {firstName ? `, ${firstName}` : ""}.{" "}
+            <span className="hero-dim">What should I take off your plate?</span>
           </h1>
-          <p className="muted" style={{ maxWidth: "52ch", fontSize: "var(--text-sm)" }}>
-            Give me a job and I will plan it, work through it in a real browser, and come back
-            when something needs your decision.
+
+          <p className="muted" style={{ maxWidth: "54ch", fontSize: "var(--text-sm)" }}>
+            I plan the work, run it in a real browser, and come back only when something needs your
+            decision.
           </p>
 
-          <div className="row wrap" style={{ gap: "var(--space-2)" }}>
-            {PROMPTS.slice(0, 2).map((prompt) => (
+          <div className="prompt-deck">
+            {PROMPTS.map((prompt, index) => (
               <button
                 key={prompt}
-                className="chip"
-                style={{ padding: "7px 12px", background: "var(--surface)", color: "var(--text-soft)" }}
+                className="prompt"
                 onClick={() => navigate(`/chat?q=${encodeURIComponent(prompt)}`)}
               >
-                {prompt}
-                <ArrowUpRight size={12} aria-hidden />
+                <span className="prompt-index">{String(index + 1).padStart(2, "0")}</span>
+                <span className="grow">{prompt}</span>
+                <ArrowUpRight size={14} aria-hidden />
               </button>
             ))}
           </div>
 
-          <div className="row wrap" style={{ gap: "var(--space-2)" }}>
-            <Button variant="primary" onClick={() => navigate("/chat")}>
+          <div className="row wrap" style={{ gap: "var(--space-2)", marginTop: 2 }}>
+            <Button variant="primary" onClick={() => navigate("/chat")} icon={<Sparkles size={14} />}>
               Start a conversation
             </Button>
             <Button variant="secondary" onClick={() => navigate("/tasks")}>
@@ -83,109 +105,125 @@ export function Today() {
         </div>
       </section>
 
-      <div className="grid-3">
-        <Card>
-          <div className="stat">
-            <span className="stat-value">{needsYou.length}</span>
-            <span className="stat-label">Waiting on you</span>
+      <section className="pulse card">
+        {[
+          ["Waiting on you", needsYou.length, "Approvals holding work up."],
+          ["In flight", inFlight.length, "Running now or queued for the next slice."],
+          ["Done this week", done.length, "Finished runs, ready to open."],
+        ].map(([label, value, note]) => (
+          <div className="pulse-item" key={String(label)}>
+            <span className="stat-value">{value}</span>
+            <span className="stat-label">{label}</span>
+            <span className="tiny faint">{note}</span>
           </div>
-          <p className="tiny muted" style={{ marginTop: 6 }}>
-            {needsYou.length ? "Approvals that are holding work up." : "Nothing needs a decision."}
-          </p>
-        </Card>
-        <Card>
-          <div className="stat">
-            <span className="stat-value">{inFlight.length}</span>
-            <span className="stat-label">In flight</span>
-          </div>
-          <p className="tiny muted" style={{ marginTop: 6 }}>
-            {inFlight.length ? "Running now, or queued for the next slice." : "The queue is empty."}
-          </p>
-        </Card>
-        <Card>
-          <div className="stat">
-            <span className="stat-value">{done.length}</span>
-            <span className="stat-label">Done this week</span>
-          </div>
-          <p className="tiny muted" style={{ marginTop: 6 }}>
-            {done.length ? "Finished runs, ready to open." : "No finished runs yet."}
-          </p>
-        </Card>
-      </div>
+        ))}
+      </section>
 
-      <Card flush>
-        <div className="card-head">
-          <h2 className="section-title">Needs a decision</h2>
-          <Link to="/tasks" className="tiny">
-            All runs
-          </Link>
-        </div>
-        {tasks.isLoading ? (
-          <div className="card-body stack">
-            <Skeleton h={16} w="60%" />
-            <Skeleton h={16} w="40%" />
+      {all.length === 0 ? (
+        <Card flush>
+          <div className="card-head">
+            <h2 className="section-title">Start here</h2>
+            <span className="tiny faint">Nothing has run yet</span>
           </div>
-        ) : needsYou.length === 0 ? (
-          <Empty
-            icon={<CheckCircle2 size={18} />}
-            title="You are all caught up"
-            body="When a run reaches something it should not do alone — a send, a payment, a delete — it will wait here with the exact action shown."
-            action={
-              <Button size="sm" onClick={() => navigate("/chat")}>
-                Give Talisman a job
-              </Button>
-            }
-          />
-        ) : (
-          <div className="list">
-            {needsYou.map((task) => (
-              <Link key={task.id} to={`/tasks/${task.id}`} className="list-item" style={{ color: "inherit" }}>
-                <Clock size={16} className="muted" style={{ marginTop: 3 }} aria-hidden />
-                <div className="grow">
-                  <div className="list-title">{task.title}</div>
-                  <div className="tiny muted">
-                    {task.progress}% · updated {timeAgo(task.updatedAt)}
-                  </div>
+          <div className="steps">
+            {START.map(([title, body], index) => (
+              <div className="step-row" key={title}>
+                <span className="step-index">{String(index + 1).padStart(2, "0")}</span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: "var(--text-sm)" }}>{title}</div>
+                  <div className="tiny muted">{body}</div>
                 </div>
-                <StatusBadge status={task.status} />
-              </Link>
+              </div>
             ))}
           </div>
-        )}
-      </Card>
-
-      <Card flush>
-        <div className="card-head">
-          <h2 className="section-title">In flight</h2>
-          {inFlight.length ? <Badge tone="live">{inFlight.length} active</Badge> : null}
-        </div>
-        {tasks.isLoading ? (
-          <div className="card-body stack">
-            <Skeleton h={16} w="70%" />
-            <Skeleton h={16} w="50%" />
+          <div style={{ padding: "var(--space-4) var(--space-5)" }}>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<ListChecks size={14} />}
+              onClick={() => navigate("/tasks")}
+            >
+              Create your first run
+            </Button>
           </div>
-        ) : inFlight.length === 0 ? (
-          <Empty
-            icon={<Package size={18} />}
-            title="Nothing running"
-            body="Runs appear here the moment they are queued, with their progress and the step they are on."
-          />
-        ) : (
-          <div className="list">
-            {inFlight.map((task) => (
-              <Link key={task.id} to={`/tasks/${task.id}`} className="list-item" style={{ color: "inherit" }}>
-                <div className="grow">
-                  <div className="list-title">{task.title}</div>
-                  <div className="bar" style={{ marginTop: 8, maxWidth: 280 }}>
-                    <span style={{ width: `${Math.max(3, task.progress)}%` }} />
-                  </div>
-                </div>
-                <StatusBadge status={task.status} />
+        </Card>
+      ) : (
+        <>
+          <Card flush>
+            <div className="card-head">
+              <h2 className="section-title">Needs a decision</h2>
+              <Link to="/approvals" className="tiny">
+                All approvals
               </Link>
-            ))}
-          </div>
-        )}
-      </Card>
+            </div>
+            {tasks.isLoading ? (
+              <div className="card-body stack">
+                <Skeleton h={16} w="60%" />
+                <Skeleton h={16} w="40%" />
+              </div>
+            ) : needsYou.length === 0 ? (
+              <Empty
+                icon={<CheckCircle2 size={17} />}
+                title="You are all caught up"
+                body="When a run reaches something it should not do alone, it waits here with the exact action shown."
+              />
+            ) : (
+              <div className="list">
+                {needsYou.map((task) => (
+                  <Link
+                    key={task.id}
+                    to={`/tasks/${task.id}`}
+                    className="list-item"
+                    style={{ color: "inherit" }}
+                  >
+                    <Clock size={16} className="muted" style={{ marginTop: 3 }} aria-hidden />
+                    <div className="grow">
+                      <div className="list-title">{task.title}</div>
+                      <div className="tiny muted">
+                        {task.progress}% · updated {timeAgo(task.updatedAt)}
+                      </div>
+                    </div>
+                    <StatusBadge status={task.status} />
+                  </Link>
+                ))}
+              </div>
+            )}
+          </Card>
+
+          <Card flush>
+            <div className="card-head">
+              <h2 className="section-title">In flight</h2>
+              {inFlight.length ? <Badge tone="live">{inFlight.length} active</Badge> : null}
+            </div>
+            {inFlight.length === 0 ? (
+              <Empty
+                icon={<Package size={17} />}
+                title="Nothing running"
+                body="Runs appear here the moment they are queued, with the step they are on."
+              />
+            ) : (
+              <div className="list">
+                {inFlight.map((task) => (
+                  <Link
+                    key={task.id}
+                    to={`/tasks/${task.id}`}
+                    className="list-item"
+                    style={{ color: "inherit" }}
+                  >
+                    <div className="grow">
+                      <div className="list-title">{task.title}</div>
+                      <div className="bar" style={{ marginTop: 8, maxWidth: 280 }}>
+                        <span style={{ width: `${Math.max(3, task.progress)}%` }} />
+                      </div>
+                    </div>
+                    <StatusBadge status={task.status} />
+                  </Link>
+                ))}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
 
       <div className="grid-2">
         <Card>

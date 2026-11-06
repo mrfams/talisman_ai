@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, MessageSquarePlus, Square, Wrench } from "lucide-react";
 import { api, streamMessage, type StoredMessage } from "../lib/api";
 import { errorMessage, useConversations, useMessages } from "../lib/queries";
-import { Badge, Button, Empty, IconButton, Markdown, Notice, Skeleton } from "../ui";
+import { Badge, Button, Empty, IconButton, Markdown, Notice, Skeleton, timeAgo } from "../ui";
 
 function textOf(message: StoredMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -206,6 +206,7 @@ export function Chat() {
                   >
                     <div className="bubble">
                       {message.role === "user" ? text : <Markdown text={text} />}
+                      <div className="msg-time">{timeAgo(message.createdAt)}</div>
                     </div>
                   </article>
                 );

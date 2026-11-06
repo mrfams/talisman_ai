@@ -61,7 +61,9 @@ export function Settings() {
             </div>
             <div className="row-between small">
               <span className="muted">Workspace</span>
-              <span className="mono tiny">{user.orgId}</span>
+              <span className="mono tiny" title={user.orgId}>
+                {user.orgId.slice(0, 8)}…
+              </span>
             </div>
             <div className="row-between small">
               <span className="muted">Member since</span>

@@ -5,6 +5,7 @@ import { Check, Sparkles } from "lucide-react";
 import { api, type AuthResult } from "../lib/api";
 import { errorMessage } from "../lib/queries";
 import { Button, Field, Input, Notice } from "../ui";
+import { BrandMark } from "../BrandMark";
 
 const PASSWORD_MIN = 12;
 
@@ -61,7 +62,9 @@ export function SignIn({ mode }: { mode: "in" | "up" }) {
     <div className="auth">
       <aside className="auth-brand">
         <div className="brand" style={{ padding: 0 }}>
-          <span className="brand-mark" aria-hidden />
+          <span className="brand-mark">
+            <BrandMark size={26} />
+          </span>
           <span className="brand-name">Talisman</span>
         </div>
 

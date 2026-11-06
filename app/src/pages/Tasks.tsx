@@ -110,20 +110,37 @@ export function Tasks() {
             <Notice tone="bad">{errorMessage(tasks.error)}</Notice>
           </div>
         ) : rows.length === 0 ? (
-          <Empty
-            icon={<ListChecks size={18} />}
-            title={filter === "all" ? "No runs yet" : "Nothing in this filter"}
-            body={
-              filter === "all"
-                ? "A run starts when you give the agent a job that takes more than one step. It keeps going in slices, so closing the tab does not stop it."
-                : "Try another filter, or start a new run."
-            }
-            action={
-              <Button size="sm" icon={<Plus size={14} />} onClick={() => setOpen(true)}>
-                New run
-              </Button>
-            }
-          />
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Attempts</th>
+                <th style={{ textAlign: "right" }}>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="table-empty">
+                <td colSpan={5}>
+                  <Empty
+                    icon={<ListChecks size={18} />}
+                    title={filter === "all" ? "No runs yet" : "Nothing in this filter"}
+                    body={
+                      filter === "all"
+                        ? "A run starts when you give the agent a job that takes more than one step. It keeps going in slices, so closing the tab does not stop it."
+                        : "Try another filter, or start a new run."
+                    }
+                    action={
+                      <Button size="sm" icon={<Plus size={14} />} onClick={() => setOpen(true)}>
+                        New run
+                      </Button>
+                    }
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </table>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="table">

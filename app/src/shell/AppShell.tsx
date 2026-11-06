@@ -22,19 +22,37 @@ import {
 import { cx } from "../lib/cx";
 import { useMe, useSignOut, useTasks, errorMessage } from "../lib/queries";
 import { IconButton } from "../ui";
+import { BrandMark } from "../BrandMark";
 
-const NAV = [
-  { to: "/", label: "Today", icon: Home, end: true },
-  { to: "/chat", label: "Chat", icon: MessageSquare },
-  { to: "/tasks", label: "Runs", icon: ListChecks },
-  { to: "/approvals", label: "Approvals", icon: ShieldCheck },
-  { to: "/artifacts", label: "Artifacts", icon: Package },
-  { to: "/connectors", label: "Connectors", icon: Plug },
-  { to: "/devices", label: "Devices", icon: Smartphone },
-  { to: "/activity", label: "Activity", icon: Activity },
-  { to: "/team", label: "Team", icon: Users },
-  { to: "/settings", label: "Settings", icon: Settings },
+const NAV_GROUPS = [
+  {
+    label: "Work",
+    items: [
+      { to: "/", label: "Today", icon: Home, end: true },
+      { to: "/chat", label: "Chat", icon: MessageSquare },
+      { to: "/tasks", label: "Runs", icon: ListChecks },
+      { to: "/approvals", label: "Approvals", icon: ShieldCheck },
+    ],
+  },
+  {
+    label: "Library",
+    items: [
+      { to: "/artifacts", label: "Artifacts", icon: Package },
+      { to: "/connectors", label: "Connectors", icon: Plug },
+      { to: "/devices", label: "Devices", icon: Smartphone },
+      { to: "/activity", label: "Activity", icon: Activity },
+    ],
+  },
+  {
+    label: "Workspace",
+    items: [
+      { to: "/team", label: "Team", icon: Users },
+      { to: "/settings", label: "Settings", icon: Settings },
+    ],
+  },
 ];
+
+const NAV = NAV_GROUPS.flatMap((group) => group.items);
 
 const MOBILE = [
   { to: "/", label: "Today", icon: Home, end: true },
@@ -110,19 +128,26 @@ export function AppShell() {
     <div className="shell">
       <aside className="rail">
         <Link to="/" className="brand" style={{ textDecoration: "none", color: "inherit" }}>
-          <span className="brand-mark" aria-hidden />
+          <span className="brand-mark">
+            <BrandMark size={26} />
+          </span>
           <span className="brand-name">Talisman</span>
         </Link>
 
-        <nav className="rail-group" aria-label="Primary">
-          {NAV.map((item) => (
-            <NavLink key={item.to} to={item.to} end={item.end} className="rail-link">
-              <item.icon size={16} aria-hidden />
-              <span>{item.label}</span>
-              {item.to === "/tasks" && (needsYou > 0 || running > 0) ? (
-                <span className="count">{needsYou > 0 ? needsYou : running}</span>
-              ) : null}
-            </NavLink>
+        <nav aria-label="Primary">
+          {NAV_GROUPS.map((group) => (
+            <div className="rail-group" key={group.label}>
+              <div className="rail-label">{group.label}</div>
+              {group.items.map((item) => (
+                <NavLink key={item.to} to={item.to} end={item.end} className="rail-link">
+                  <item.icon size={16} aria-hidden />
+                  <span>{item.label}</span>
+                  {item.to === "/tasks" && (needsYou > 0 || running > 0) ? (
+                    <span className="count">{needsYou > 0 ? needsYou : running}</span>
+                  ) : null}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 
