@@ -1,0 +1,178 @@
+"""The one seam every device sits behind.
+
+A backend implements a single method — send(op, **kw) — over the op vocabulary
+below. Ops are named for what they MEAN, never for how a platform does them,
+which is what lets helpers.py carry no platform knowledge at all: `nav.home`
+means the same thing to an iPhone and a Pixel, though one is a Cmd+1 keystroke
+into a video stream and the other is a KEYCODE_HOME over adb.
+
+Phones have no shared wire protocol — SkyLight event records and adb have
+nothing in common — so the shared layer is this vocabulary instead.
+
+    screen.capture      path=None       -> (png_path, bounds)
+    screen.bounds                       -> {x, y, w, h, id} or None
+    screen.require                      -> bounds, or raise
+    screen.text         min_confidence  -> [{text, confidence, source, x, y, w, h}]
+    screen.text_pixels  min_confidence  -> same, forced through pixel OCR
+
+        screen.text is the load-bearing op. iOS answers with Vision OCR over a
+        capture; a device with an accessibility tree answers from the tree.
+        Same contract, same coordinate space, very different fidelity, so each
+        box carries `source`: "pixels" means a recogniser inferred it and may
+        have misread, "tree" means the OS reported it exactly. It has to be an
+        explicit field — Vision returns confidence 1.0 for clean text just as a
+        tree does, so confidence cannot tell them apart.
+
+    input.tap           x, y
+    input.press         x, y, duration              long press
+    input.drag          x1, y1, x2, y2, duration, steps
+    input.scroll        x, y, dy, dx, steps         content-space deltas
+    input.keys          combo
+    input.text          s, delay, keystrokes
+
+        input.text pastes by default, which is exact; keystrokes=True asks for
+        real key events instead. The distinction is in the vocabulary because
+        it changes what arrives: a keystroke path runs through the device's own
+        autocorrect and keyboard layout, a paste does not. Backends without a
+        shared clipboard may only support keystrokes.
+
+        duration and steps stay in the vocabulary rather than being hidden. On
+        iOS a fast short drag is a momentum flick and a slow one barely
+        registers; over adb the same knob decides whether a list flings past
+        rows between captures. Abstracting it away would cost behaviour.
+
+    nav.home / nav.back / nav.recents
+    apps.launch  name -> app id
+    apps.current      -> app id or None
+    apps.list    include_system=False -> [app id]
+
+        Unsupported where the concept does not exist, rather than emulated.
+        iPhone Mirroring has no system Back button and exposes no app
+        inventory; Android has no Spotlight. A fake Back that guesses at an
+        edge swipe returns a result the caller cannot tell from a real one.
+
+    session.state                       -> backend-defined string, 'ready' when usable
+    session.require                     -> bounds, or raise telling the USER what to do
+    session.refocus                     -> None    (a no-op where nothing needs focus)
+    session.detail                      -> str, why the session is unusable
+
+    focus.probe                         -> opaque snapshot
+    focus.diff          before, after   -> {raised, stole_focus}
+
+    url.open            url             -> app id
+
+        Opens an https link in the phone's browser. The link arrives whole,
+        without typing or the clipboard. Unsupported where the phone has no
+        such path; a link is often a credential, so it is never logged.
+
+        Whether driving the phone disturbed whatever the user was doing. Two
+        separate questions on purpose: taking keyboard focus is a mild
+        annoyance, covering the screen is not, and a backend that reaches the
+        device directly does neither.
+
+    tree                                -> [node]   where the device has one
+    raw                 ...             backend-specific escape hatch
+
+Anything a backend genuinely cannot do raises Unsupported. Callers gate on
+supports(op) rather than guessing.
+"""
+import importlib
+import os
+import sys
+
+
+class Unsupported(RuntimeError):
+    """This device cannot do that op, and retrying will not help.
+
+    Distinct from a failure: iPhone Mirroring has no accessibility tree, so
+    `tree` is not a flaky call, it is absent.
+    """
+
+
+OP_NAMES = (
+    "screen.capture", "screen.bounds", "screen.require",
+    "screen.text", "screen.text_pixels",
+    "input.tap", "input.press", "input.drag", "input.scroll",
+    "input.keys", "input.text",
+    "nav.home", "nav.back", "nav.recents",
+    "apps.launch", "apps.current", "apps.list",
+    "session.state", "session.require", "session.refocus", "session.detail",
+    "focus.probe", "focus.diff",
+    "url.open",
+    "tree", "raw",
+)
+
+
+class Backend:
+    """Dispatches send() to _screen_capture, _input_tap, _nav_home, and so on.
+
+    A subclass defines only the ops it can honour; everything it omits becomes
+    Unsupported automatically, so a backend never keeps a capability list in
+    sync with its own code.
+    """
+
+    name = "backend"
+
+    def _slot(self, op):
+        return "_" + op.replace(".", "_")
+
+    def send(self, op, **kw):
+        fn = getattr(self, self._slot(op), None)
+        if fn is None:
+            raise Unsupported(f"{self.name} cannot {op!r}")
+        return fn(**kw)
+
+    def supports(self, op):
+        return getattr(self, self._slot(op), None) is not None
+
+    def ops(self):
+        """Every op this backend implements, filtered against the vocabulary so
+        internal helpers can never masquerade as ops."""
+        return [op for op in OP_NAMES if self.supports(op)]
+
+
+def connect(platform=None, **kw):
+    """Build a backend. Explicit argument, else PHONE_HARNESS_PLATFORM, else
+    `platform` in the config file (`phone-harness config set platform …`),
+    else ios.
+
+    Returns an object rather than installing a module global, so a script can
+    hold two devices at once instead of being limited to one per process.
+    helpers.py binds one of these as its default.
+    """
+    from . import config
+    if platform is None:
+        platform, source = config.lookup("platform")
+        if not source.startswith("env:"):
+            # A phone rented with `cloud start` is the one meant, even on a
+            # Mac whose default is the iPhone. An explicit platform still wins.
+            from . import cloud
+            rented = cloud.attached()
+            if rented and rented["link"]["kind"] == "control":
+                from .remote import Remote
+                return Remote(rented["link"]["url"], rented["link"]["token"])
+            if rented:
+                platform = "android"
+            else:
+                # The agent was driving a cloud phone and it ended. Falling
+                # through would run the next script on whatever phone is on
+                # this desk. Say so, and name the command that starts the
+                # same catalog phone again. This does not rent one itself.
+                lost = cloud.lost()
+                if lost:
+                    # Reporting clears the stored note so the next command does
+                    # not repeat it. This call still fails, and so does a later
+                    # call in this process: lost() remembers what it reported.
+                    if lost.get("sid") not in cloud._reported_dead:
+                        cloud.report_ended(lost)
+                    raise cloud.CloudPhoneError(cloud.ended_message(lost))
+    platform = platform.lower()
+    if platform in ("ios", "iphone", "ipad"):
+        if sys.platform != "darwin":
+            raise RuntimeError("iPhone control needs macOS (it drives the iPhone Mirroring app); "
+                               "on this machine use Android: PHONE_HARNESS_PLATFORM=android "
+                               "or `phone-harness config set platform android`")
+        return importlib.import_module(".ios", __package__).IPhone(**kw)
+    if platform == "android":
+        return importlib.import_module(".android", __package__).Android(**kw)
+    raise ValueError(f"unknown platform {platform!r}")

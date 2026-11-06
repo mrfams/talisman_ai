@@ -1,0 +1,412 @@
+"""Where phone-harness keeps what the user chose and what it learned.
+
+Kept apart because they live differently:
+
+  config   intent — the default platform, the adb binary, how often to poke
+           a phone awake. Hand-editable, small, worth putting in dotfiles.
+             ~/.config/phone-harness/config.json
+           The cloud sign-in sits beside it, private to the user:
+             ~/.config/phone-harness/auth.json
+  state    what the harness learned — remembered phones and which is
+           primary, the attached cloud phone, the pid of a running awake
+           session. Machine-managed, rebuildable, never worth backing up.
+             ~/.local/state/phone-harness/devices.json
+             ~/.local/state/phone-harness/cloud.json
+             ~/.local/state/phone-harness/telemetry.json
+             ~/.local/state/phone-harness/run/awake.pid
+  cache    the once-a-day update check: when it last looked, and the latest
+           version it saw.
+             ~/.cache/phone-harness/update.json
+
+XDG_CONFIG_HOME / XDG_STATE_HOME / XDG_CACHE_HOME are honoured;
+PHONE_HARNESS_HOME moves all three roots under one directory (tests, sandboxes).
+
+One rule for every setting: explicit argument, else environment variable,
+else config file, else built-in default. A `.env` file at the repo root or
+in the agent workspace is read once at import and fills in environment
+variables that are not already set: a place
+for per-machine overrides such as PHONE_HARNESS_CLOUD_API, never committed.
+Resolving that workspace creates it from the packaged defaults when the
+directory does not exist; an existing directory is not modified. An
+install keeps it under the home directory, not the install prefix.
+`get("android.poke_every")` looks at PHONE_HARNESS_ANDROID_POKE_EVERY, then
+config.json, then DEFAULTS. Env vars are per-call overrides; nothing
+requires them.
+
+Files are versioned, read forgivingly (a corrupt file is a warning and
+defaults, never a crash) and written atomically. Unknown keys survive a
+round trip. This module owns the disk; backends ask it.
+"""
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+VERSION = 1
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _load_env_files():
+    """KEY=value lines from <repo>/.env and <agent-workspace>/.env into the
+    environment, without overriding what is already set. No dependency; a
+    `#` line is a comment, quotes around a value are stripped.
+
+    The workspace path is the same one the helpers use, so a missing
+    directory is seeded before its `.env` is read."""
+    from .workspace import agent_workspace
+    workspace = agent_workspace()
+    for path in (_REPO_ROOT / ".env", workspace / ".env"):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_env_files()
+
+DEFAULTS = {
+    "platform": "ios" if sys.platform == "darwin" else "android",   # iPhone needs a Mac
+    "telemetry": True,         # usage events; `config set telemetry false`
+    "android": {
+        "adb": "adb",          # the binary; a path if it is not on PATH
+        "poke_every": 25,      # seconds between keep-awake pokes
+        "mirror": True,        # open scrcpy during `android awake` if installed
+    },
+    "cloud": {
+        "minutes": 15,         # how long `cloud start` keeps a phone for
+        "max_minutes": 30,     # the most one `cloud start` may ask for
+        "watch": True,         # `cloud start` opens the phone's live view in the browser
+        "phone": "",           # what a bare `cloud start` names: a catalog id or label; empty = the service's unnamed start
+    },
+    "ios": {
+        "restore_clipboard": False,   # put the old clipboard back after a paste
+        "paste_settle": 2.0,          # ...after this many seconds, if so
+    },
+}
+
+# Settings that historically had their own environment variable.
+_ENV_ALIASES = {
+    "platform": ["PHONE_HARNESS_PLATFORM"],
+    "android.adb": ["PHONE_HARNESS_ADB"],
+}
+
+
+# --- where -------------------------------------------------------------------
+
+def config_dir():
+    home = os.environ.get("PHONE_HARNESS_HOME")
+    if home:
+        return Path(home) / "config"
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "phone-harness"
+
+
+def state_dir():
+    home = os.environ.get("PHONE_HARNESS_HOME")
+    if home:
+        return Path(home) / "state"
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "phone-harness"
+
+
+def cache_dir():
+    home = os.environ.get("PHONE_HARNESS_HOME")
+    if home:
+        return Path(home) / "cache"
+    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(base) / "phone-harness"
+
+
+def run_dir():
+    return state_dir() / "run"
+
+
+def paths():
+    return {"config": config_dir() / "config.json",
+            "auth": config_dir() / "auth.json",
+            "devices": state_dir() / "devices.json",
+            "cloud": state_dir() / "cloud.json",
+            "telemetry": state_dir() / "telemetry.json",
+            "update": cache_dir() / "update.json",
+            "run": run_dir()}
+
+
+# --- files -------------------------------------------------------------------
+
+def _read(path, empty):
+    try:
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        return data
+    except FileNotFoundError:
+        return dict(empty)
+    except (OSError, ValueError) as e:
+        print(f"phone-harness: ignoring unreadable {path} ({e}); using defaults",
+              file=sys.stderr)
+        return dict(empty)
+
+
+def _write(path, data):
+    """Atomic: a crash mid-write leaves the old file, not half a new one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"version": VERSION, **{k: v for k, v in data.items() if k != "version"}}
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def load():
+    return _read(paths()["config"], {})
+
+
+def save(data):
+    _write(paths()["config"], data)
+
+
+def config_unreadable():
+    """config.json exists and cannot be read, so what it says is unknown."""
+    try:
+        return not isinstance(json.loads(paths()["config"].read_text()), dict)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+
+
+# --- settings ----------------------------------------------------------------
+
+def _dig(d, key):
+    for part in key.split("."):
+        if not isinstance(d, dict) or part not in d:
+            return None
+        d = d[part]
+    return d
+
+
+def _coerce(text, like):
+    """An env-var string, shaped like the default it overrides."""
+    if isinstance(like, bool):
+        return text.strip().lower() in ("1", "true", "yes", "on")
+    if isinstance(like, (int, float)):
+        try:
+            return type(like)(text)
+        except ValueError:
+            return like
+    return text
+
+
+def _env_names(key):
+    return _ENV_ALIASES.get(key, []) + [
+        "PHONE_HARNESS_" + key.upper().replace(".", "_")]
+
+
+def lookup(key, default=None):
+    """(value, source) for a dotted key; source is 'env:NAME', 'file',
+    'default' or 'unset'."""
+    built_in = _dig(DEFAULTS, key)
+    for name in _env_names(key):
+        if name in os.environ:
+            return _coerce(os.environ[name], built_in), f"env:{name}"
+    v = _dig(load(), key)
+    if v is not None:
+        if isinstance(built_in, bool) and isinstance(v, str):
+            v = _coerce(v, built_in)
+        return v, "file"
+    if built_in is not None:
+        return built_in, "default"
+    return default, "unset"
+
+
+def get(key, default=None):
+    return lookup(key, default)[0]
+
+
+def set(key, value):
+    """Set a dotted key in config.json. Strings that look like JSON scalars
+    ('true', '25') become that value, so the CLI can pass text through."""
+    built_in = _dig(DEFAULTS, key)
+    if isinstance(value, str):
+        if isinstance(built_in, bool):
+            value = _coerce(value, built_in)
+        else:
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, (bool, int, float)) or parsed is None:
+                    value = parsed
+            except ValueError:
+                pass
+    data = load()
+    d = data
+    parts = key.split(".")
+    for part in parts[:-1]:
+        if not isinstance(d.get(part), dict):
+            d[part] = {}
+        d = d[part]
+    d[parts[-1]] = value
+    save(data)
+    return value
+
+
+def unset(key):
+    data = load()
+    d = data
+    parts = key.split(".")
+    for part in parts[:-1]:
+        d = d.get(part) if isinstance(d, dict) else None
+        if d is None:
+            return
+    d.pop(parts[-1], None)
+    save(data)
+
+
+def known_keys():
+    out = []
+    def walk(d, prefix=""):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                walk(v, prefix + k + ".")
+            else:
+                out.append(prefix + k)
+    walk(DEFAULTS)
+    return out
+
+
+# --- devices (state) ---------------------------------------------------------
+
+def devices():
+    """The remembered-devices file, whole: {"version", "<kind>": {...}}.
+    Migrates the pre-config android.json once, if it is found."""
+    p = paths()["devices"]
+    data = _read(p, {})
+    if not data.get("android"):
+        legacy = config_dir() / "android.json"
+        if legacy.exists():
+            old = _read(legacy, {})
+            if old.get("phones") or old.get("primary"):
+                data["android"] = {"primary": old.get("primary"),
+                                   "phones": old.get("phones") or {}}
+                _write(p, data)
+                legacy.rename(legacy.with_suffix(".json.migrated"))
+    return data
+
+
+def devices_of(kind):
+    """The section for one backend, always shaped {"primary", "phones"}."""
+    sect = devices().get(kind) or {}
+    return {"primary": sect.get("primary"), "phones": sect.get("phones") or {}}
+
+
+def save_devices_of(kind, section):
+    data = devices()
+    data[kind] = {"primary": section.get("primary"),
+                  "phones": section.get("phones") or {}}
+    _write(paths()["devices"], data)
+
+
+# --- telemetry (state) -------------------------------------------------------
+
+def install_id():
+    """A random id minted once per machine: telemetry's distinct_id. Signing
+    in to the cloud links it to the account (telemetry.link_user). Delete the
+    file to get a new one."""
+    import uuid
+    p = paths()["telemetry"]
+    data = _read(p, {})
+    if not isinstance(data.get("install_id"), str):
+        data["install_id"] = str(uuid.uuid4())
+        _write(p, data)
+    return data["install_id"]
+
+
+def telemetry_user():
+    """The uid of the cloud account this install's telemetry is linked to, or None."""
+    uid = _read(paths()["telemetry"], {}).get("user_id")
+    return uid if isinstance(uid, str) and uid else None
+
+
+def set_telemetry_user(uid):
+    """Link telemetry to the cloud account `uid`; None unlinks it (sign-out)."""
+    p = paths()["telemetry"]
+    data = _read(p, {})
+    if uid:
+        data["user_id"] = uid
+    elif data.pop("user_id", None) is None:
+        return
+    _write(p, data)
+
+
+# --- CLI (phone-harness config ...) -----------------------------------------
+
+CLI_USAGE = """Usage:
+  phone-harness config                 every setting, its value, and where it came from
+  phone-harness config get KEY
+  phone-harness config set KEY VALUE   e.g. config set platform android
+  phone-harness config unset KEY
+  phone-harness config path            where the files live
+"""
+
+
+def _config_parser():
+    from .term import Parser
+    parser = Parser(
+        prog="phone-harness config",
+        description=CLI_USAGE.strip("\n"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="cmd", required=False, metavar="{get,set,unset,path}")
+    get = sub.add_parser("get", help="print one setting",
+                         description="Print one setting as JSON.")
+    get.add_argument("key", metavar="KEY", help="setting name")
+    setp = sub.add_parser("set", help="set one setting",
+                          description="Set one setting. platform must be ios or android.")
+    setp.add_argument("key", metavar="KEY", help="setting name")
+    setp.add_argument("value", metavar="VALUE", help="new value")
+    unset = sub.add_parser("unset", help="remove one setting",
+                           description="Remove one setting from the config file.")
+    unset.add_argument("key", metavar="KEY", help="setting name")
+    path = sub.add_parser("path", help="where the files live",
+                          description="Print where the config, state, and cache files live.")
+    path.add_argument("extra", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    return parser
+
+
+def cli(args):
+    ns = _config_parser().parse_args(list(args))
+    if ns.cmd is None:
+        for key in known_keys():
+            value, source = lookup(key)
+            print(f"{key:<22} {json.dumps(value):<10} ({source})")
+        for k, v in load().items():
+            if k != "version" and not isinstance(v, dict) and k not in known_keys():
+                print(f"{k:<22} {json.dumps(v):<10} (file, unknown key)")
+        return 0
+    if ns.cmd == "get":
+        value, source = lookup(ns.key)
+        print(json.dumps(value) if source != "unset" else f"{ns.key}: unset")
+        return 0 if source != "unset" else 1
+    if ns.cmd == "set":
+        if ns.key == "platform" and ns.value not in ("ios", "android"):
+            print("platform must be ios or android"); return 2
+        v = set(ns.key, ns.value)
+        print(f"{ns.key} = {json.dumps(v)}")
+        return 0
+    if ns.cmd == "unset":
+        unset(ns.key); print(f"{ns.key} unset"); return 0
+    bad = [w for w in ns.extra if str(w).startswith("-")]
+    if bad:
+        _config_parser().error("unrecognized arguments: " + " ".join(bad))
+    for k, v in paths().items():
+        print(f"{k:<8} {v}")
+    return 0

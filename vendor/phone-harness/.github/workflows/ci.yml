@@ -1,0 +1,68 @@
+# Installs on every OS and proves the Android path imports without Apple frameworks.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  PHONE_HARNESS_TELEMETRY: "0"
+
+jobs:
+  openclaw-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: integrations/openclaw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24" }
+      - run: npm ci --ignore-scripts
+      - name: typecheck and build the plugin and its skill
+        run: npm run build
+      - name: unit tests (no OpenClaw, no phone)
+        run: npm test
+
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install .
+      - name: the CLI runs and the Android backend imports without pyobjc
+        shell: bash
+        run: |
+          phone-harness skill > /dev/null
+          python -c "import phone_harness.android, phone_harness.transport, phone_harness.config as c; print('default platform:', c.get('platform'))"
+      - name: doctor names the adb install for this OS when adb is missing
+        shell: bash
+        run: |
+          out=$(PHONE_HARNESS_PLATFORM=android phone-harness --doctor android 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "adb found"
+      - name: unit tests (fake cloud API, fake adb)
+        if: runner.os != 'Windows'     # the fake adb is a shell script
+        run: python -m unittest discover tests
+      - name: iPhone is refused with a clear message off macOS
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          python -c "
+          import phone_harness.transport as t
+          try:
+              t.connect('ios'); raise SystemExit('expected a refusal')
+          except RuntimeError as e:
+              assert 'needs macOS' in str(e), e
+              print('ok:', e)
+          "

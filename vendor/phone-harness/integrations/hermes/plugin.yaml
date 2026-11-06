@@ -1,0 +1,25 @@
+name: phone-harness
+version: 0.1.0
+manifest_version: 2
+description: Drive a real phone from Hermes with one phone_exec tool (iPhone via iPhone Mirroring, Android over adb, or a cloud phone)
+author: Shawn Pana
+license: MIT
+homepage: https://phone-harness.com
+tags: [phone, iphone, android, automation]
+provides_tools:
+  - phone_exec
+provides_hooks:
+  - pre_tool_call
+requires_hermes: ">=0.21.6"
+python_dependencies:
+  - "phone-harness==0.3.3"
+config_schema:
+  classifier_auto_run:
+    type: bool
+    default: false
+    description: >-
+      Skip the approval prompt for scripts a classifier judges to be phone-only.
+      The classifier is a heuristic and can be bypassed, so a script may still
+      reach this computer. Leave this off unless you accept that. Off by default,
+      every phone_exec call asks, and one session or always answer covers later
+      calls in the session.

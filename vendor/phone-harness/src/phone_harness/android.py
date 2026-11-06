@@ -1,0 +1,1097 @@
+"""Android backend: the op vocabulary over adb, and nothing else.
+
+No agent app on the phone, no Appium, no window to find, no OCR: `screencap`
+is the capture and `uiautomator dump` is the tree, so screen.text answers
+exactly (source: "tree") where iOS has to recognise glyphs. adb reaches the
+device directly, so focus.probe/diff report nothing disturbed and
+session.refocus is a no-op. Coordinates are device pixels and screen.bounds
+is the whole display: a text box's centre is already a tap target.
+
+Connecting is the phone's own developer path, over USB or Wi-Fi:
+
+    USB       Developer options > USB debugging, plug in, tap Allow.
+    Wireless  Developer options > Wireless debugging > Pair device with
+              pairing code, then:  phone-harness android pair CODE
+
+The agent never picks a device. session.require, which every helper passes
+through, resolves one: an explicit ANDROID_SERIAL, else a cloud phone from
+`cloud start`, else the saved primary and only that phone. If a primary is
+set and cannot be reached, this fails and says it is unreachable instead of
+connecting a different paired or mDNS phone. When no primary is configured,
+a USB phone that is plugged in is used, else a live wireless link, else a
+paired phone found on the LAN over mDNS, else a message naming the physical
+step that is missing. Paired phones are
+remembered (see config.py: the devices state file) under a friendly name and
+matched by hardware serial, so a phone whose Wi-Fi port changed overnight is
+still "pixel-8". The first phone paired over Wi-Fi becomes the primary;
+`phone-harness android use NAME` changes that; ANDROID_SERIAL overrides
+everything.
+"""
+import argparse
+import importlib.util
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+
+from . import config
+from . import term
+from .transport import Backend, Unsupported
+
+# Apple's Vision OCR ships with the iPhone backend; on a Mac it can read an
+# Android screenshot too, so a screen the accessibility tree cannot describe
+# still yields text. Checked cheaply here, imported only when needed.
+_VISION = importlib.util.find_spec("Vision") is not None
+
+# How long a never-idle screen keeps the tree off. uiautomator itself waits
+# ~10s for idle before refusing, so one refusal is expensive; asking again a
+# second later gets the same answer.
+_TREE_BUSY_FOR = 20
+
+
+def _adb_bin():
+    return str(config.get("android.adb"))
+
+# input.keys names -> Android keycodes. Modifier chords are not a thing
+# `input keyevent` can express, so combos raise rather than half-work.
+_KEYS = {
+    "enter": "ENTER", "return": "ENTER", "tab": "TAB", "space": "SPACE",
+    "delete": "DEL", "backspace": "DEL", "escape": "ESCAPE", "esc": "ESCAPE",
+    "home": "HOME", "back": "BACK", "recents": "APP_SWITCH", "menu": "MENU",
+    "up": "DPAD_UP", "down": "DPAD_DOWN", "left": "DPAD_LEFT",
+    "right": "DPAD_RIGHT", "power": "POWER", "volumeup": "VOLUME_UP",
+    "volumedown": "VOLUME_DOWN", "search": "SEARCH",
+}
+
+
+# Names people say -> package ids that do not contain them. Only apps whose
+# id would not be found by matching the name against installed ids; first
+# installed one wins.
+_APP_IDS = {
+    "tiktok": ("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
+    "x": ("com.twitter.android",), "twitter": ("com.twitter.android",),
+    "threads": ("com.instagram.barcelona",),
+    "facebook": ("com.facebook.katana", "com.facebook.lite"),
+    "messenger": ("com.facebook.orca",),
+    "signal": ("org.thoughtcrime.securesms",),
+    "gmail": ("com.google.android.gm",),
+    "playstore": ("com.android.vending",), "googleplay": ("com.android.vending",),
+    "uber": ("com.ubercab",), "ubereats": ("com.ubercab.eats",),
+    "cashapp": ("com.squareup.cash",),
+    "amazon": ("com.amazon.mShop.android.shopping",),
+    "googlemaps": ("com.google.android.apps.maps",),
+    "messages": ("com.google.android.apps.messaging",),
+    "phone": ("com.google.android.dialer", "com.android.dialer"),
+    "clock": ("com.google.android.deskclock", "com.android.deskclock"),
+    "files": ("com.google.android.documentsui", "com.android.documentsui"),
+}
+
+
+# --- adb, without a device yet -----------------------------------------------
+
+def _run(*args, binary=False, timeout=60, check=True):
+    r = subprocess.run([_adb_bin(), *args], capture_output=True, timeout=timeout)
+    if check and r.returncode != 0:
+        err = (r.stderr or r.stdout).decode(errors="replace").strip()
+        raise RuntimeError(f"adb {' '.join(args)} failed: {err}")
+    return r.stdout if binary else r.stdout.decode(errors="replace")
+
+
+def _attached():
+    """[(adb_id, state, transport)] — transport is 'usb' or 'wifi'."""
+    rows = [l.split() for l in _run("devices").splitlines()[1:] if l.strip()]
+    return [(r[0], r[1], "wifi" if ":" in r[0] or r[0].startswith("adb-")
+             else "usb") for r in rows if len(r) >= 2]
+
+
+def _prop(adb_id, name):
+    return _run("-s", adb_id, "shell", "getprop", name, timeout=15).strip()
+
+
+def _ready_id_for_serial(serial):
+    """The adb id of a device that is already up and has this hardware serial."""
+    if not serial:
+        return None
+    for adb_id, state, _transport in _attached():
+        if state != "device":
+            continue
+        try:
+            if _prop(adb_id, "ro.serialno") == serial:
+                return adb_id
+        except RuntimeError:
+            pass
+    return None
+
+
+def _mdns(kind="connect"):
+    """Phones announcing themselves on the LAN: [{serial, host, port, addr}]
+    for _adb-tls-connect services (paired phones with Wireless debugging on)
+    or, with kind="pairing", _adb-tls-pairing services (a phone showing its
+    "Pair device with pairing code" dialog right now). The service name
+    carries the hardware serial: adb-<SERIAL>-<suffix>."""
+    out = _run("mdns", "services", check=False)
+    found = []
+    for line in out.splitlines():
+        parts = line.split("\t") if "\t" in line else line.split()
+        if len(parts) < 3 or f"_adb-tls-{kind}" not in parts[1]:
+            continue
+        m = re.match(r"adb-(.+)-[^-]+$", parts[0])
+        host, _, port = parts[2].rpartition(":")
+        if m and host and port.isdigit():
+            found.append({"serial": m.group(1), "host": host,
+                          "port": int(port), "addr": parts[2]})
+    return found
+
+
+# --- the registry: phones we know, and which one is primary -----------------
+
+def _load():
+    return config.devices_of("android")
+
+
+def _store(cfg):
+    config.save_devices_of("android", cfg)
+
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _remember(cfg, serial, model, host=None, name=None, primary=False):
+    """Upsert a phone by serial. `primary=True` makes it the primary if there
+    is none yet — passed by wireless pairing, not by a phone that merely
+    showed up on USB: the primary is which phone to reach for over Wi-Fi."""
+    phones = cfg.setdefault("phones", {})
+    key = next((k for k, p in phones.items() if p.get("serial") == serial), None)
+    if key is None:
+        base = name or re.sub(r"[^a-z0-9]+", "-", (model or "android").lower()).strip("-")
+        key, n = base, 2
+        while key in phones:
+            key, n = f"{base}-{n}", n + 1
+        phones[key] = {"serial": serial, "model": model, "paired": _now()}
+    p = phones[key]
+    p["last_seen"] = _now()
+    if host:
+        p["last_host"] = host
+    if primary and not cfg.get("primary"):
+        cfg["primary"] = key
+    _store(cfg)
+    return key
+
+
+class TreeUnavailable(RuntimeError):
+    """uiautomator would not dump this screen; retrying will not change that."""
+
+
+class PrimaryUnreachable(RuntimeError):
+    """The saved primary phone is not reachable. Not a cue to use another."""
+
+
+class Android(Backend):
+    name = "android"
+
+    def __init__(self, serial=None):
+        if serial:
+            os.environ["ANDROID_SERIAL"] = serial
+        self._bounds = None
+        self._motionevents = None       # does this phone's `input` know motionevent?
+        self._tree_busy_until = 0.0     # after "could not get idle state": read pixels
+        self._resolved = False
+        self._gate_at = 0.0
+
+    # --- adb plumbing -------------------------------------------------------
+
+    def _adb(self, *args, binary=False, timeout=60):
+        """Every device-side command pins the device first: adb may list one
+        phone twice over Wi-Fi (by ip:port and by its mDNS name), and an
+        unpinned command then fails with "more than one device"."""
+        if not self._resolved and self._resolve() is None:
+            self._session_require()               # raises with the physical step
+        from . import cloud
+        rented = cloud.attached("adb")
+        if not rented or os.environ.get("ANDROID_SERIAL") != cloud.serial_of(rented):
+            return _run(*args, binary=binary, timeout=timeout)
+        # A rented phone is reached over the internet, and every new connection
+        # to it starts locked (commands answer "locked"): reconnect once, and
+        # only then is a failure real.
+        try:
+            out = _run(*args, binary=binary, timeout=timeout)
+            if out.strip() not in ("locked", b"locked"):
+                return out
+        except RuntimeError:
+            pass
+        cloud.ensure_connected(rented)
+        return _run(*args, binary=binary, timeout=timeout)
+
+    def _sh(self, cmd, timeout=60):
+        return self._adb("shell", cmd, timeout=timeout)
+
+    # --- choosing the phone -------------------------------------------------
+
+    def _resolve(self):
+        """Pin ANDROID_SERIAL to one ready device. Returns the adb id, or
+        None when no phone is configured and none is plugged in.
+
+        Order: the user's explicit ANDROID_SERIAL; then a phone rented with
+        `phone-harness cloud start`; then, when a primary is saved, only that
+        phone. A different paired or mDNS phone is not a stand-in: if the
+        primary cannot be reached this raises. When no primary is configured,
+        a USB phone wins, then a live Wi-Fi link, then any paired phone mDNS
+        can see.
+        """
+        if os.environ.get("ANDROID_SERIAL"):
+            self._resolved = True
+            return os.environ["ANDROID_SERIAL"]
+        from . import cloud
+        rented = cloud.attached("adb")
+        if rented:
+            # Not remembered below: its address is reused by other phones.
+            os.environ["ANDROID_SERIAL"] = cloud.ensure_connected(rented)
+            self._resolved = True
+            return os.environ["ANDROID_SERIAL"]
+        cfg = _load()
+        primary_name = cfg.get("primary") or ""
+        primary = (cfg.get("phones") or {}).get(primary_name, {}) if primary_name else {}
+        known = {p.get("serial") for p in (cfg.get("phones") or {}).values()}
+
+        def finish(chosen):
+            os.environ["ANDROID_SERIAL"] = chosen
+            self._resolved = True
+            try:
+                _remember(cfg, _prop(chosen, "ro.serialno"),
+                          _prop(chosen, "ro.product.model"),
+                          host=chosen.rpartition(":")[0] if ":" in chosen else None)
+            except RuntimeError:
+                pass
+            return chosen
+
+        if primary_name:
+            serial = primary.get("serial")
+            chosen = _ready_id_for_serial(serial) if serial else None
+            if chosen is None and serial:
+                for service in _mdns():
+                    if service.get("serial") != serial:
+                        continue
+                    out = _run("connect", service["addr"], timeout=15, check=False)
+                    if "connected" in out and "cannot" not in out:
+                        break
+                chosen = _ready_id_for_serial(serial)
+            if chosen is None:
+                raise PrimaryUnreachable(
+                    f"The primary Android phone {primary_name!r} is unreachable. "
+                    "This did not connect to another phone.")
+            return finish(chosen)
+
+        def pick(ready):
+            usb = [r for r in ready if r[2] == "usb"]
+            if usb:
+                return usb[0][0]
+            wifi = [r for r in ready if r[2] == "wifi"]
+            return wifi[0][0] if wifi else None
+
+        ready = [r for r in _attached() if r[1] == "device"]
+        chosen = pick(ready)
+        if chosen is None:
+            wanted = sorted(s for s in known if s)
+            services = _mdns()
+            services.sort(key=lambda s: (wanted.index(s["serial"])
+                                         if s["serial"] in wanted else len(wanted)))
+            for service in services:
+                out = _run("connect", service["addr"], timeout=15, check=False)
+                if "connected" in out and "cannot" not in out:
+                    break
+            ready = [r for r in _attached() if r[1] == "device"]
+            chosen = pick(ready)
+        if chosen is not None:
+            return finish(chosen)
+        return None
+
+    # --- awake and unlocked? -----------------------------------------------
+
+    def _screen_status(self):
+        """(awake, locked) from two dumpsys reads, ~0.2s. adb happily taps a
+        lock screen and dumps its PIN pad; nothing errors — so we ask."""
+        awake = "Awake" in self._sh("dumpsys power | grep -m1 mWakefulness=")
+        locked = "isKeyguardShowing=true" in self._sh(
+            "dumpsys window | grep -m1 isKeyguardShowing")
+        return awake, locked
+
+    def _gate(self):
+        """Refuse to drive a phone that is asleep or locked. Waking it is
+        harmless and done here; unlocking is the user's — a PIN is never
+        typed for them. Cached for 2s so a burst of taps checks once."""
+        if time.time() - self._gate_at < 2.0:
+            return
+        awake, locked = self._screen_status()
+        if not awake:
+            self._sh("input keyevent KEYCODE_WAKEUP")
+            time.sleep(0.5)
+            awake, locked = self._screen_status()
+        if locked:
+            raise RuntimeError(
+                "The Android phone is locked. Unlock it (PIN / fingerprint), "
+                "then retry — I won't enter a PIN. It re-locks after its screen "
+                "timeout; `phone-harness android awake` keeps it awake for the "
+                "session without changing any setting.")
+        self._gate_at = time.time()
+
+    # --- screen -------------------------------------------------------------
+
+    def _screen_bounds(self):
+        """Current default-display pixels, including rotation and size changes."""
+        if self._resolve() is None:
+            return None
+        try:
+            out = self._sh("dumpsys window displays")
+        except RuntimeError:
+            out = ""
+        # wm size describes the unrotated display. WindowManager's current
+        # dimensions match the screenshot and input coordinate space. Read
+        # them each time: one connection can outlive a rotation or wm resize.
+        m = re.search(r"Display: mDisplayId=0\b[^\n]*\n[^\n]*\bcur=(\d+)x(\d+)", out)
+        if not m:
+            # Retain support for devices whose WindowManager dump differs.
+            try:
+                out = self._sh("wm size")
+            except RuntimeError:
+                return None
+            m = (re.search(r"Override size:\s*(\d+)x(\d+)", out)
+                 or re.search(r"Physical size:\s*(\d+)x(\d+)", out))
+        if not m:
+            return None
+        self._bounds = {"x": 0, "y": 0, "w": int(m.group(1)),
+                        "h": int(m.group(2)),
+                        "id": os.environ.get("ANDROID_SERIAL")}
+        return self._bounds
+
+    def _screen_require(self):
+        b = self._screen_bounds()
+        return b if b is not None else self._session_require()
+
+    def _screen_capture(self, path=None):
+        bounds = self._screen_require()
+        png = self._adb("exec-out", "screencap", "-p", binary=True)
+        if path is None:
+            fd, path = tempfile.mkstemp(prefix="phone-android-", suffix=".png")
+            os.close(fd)
+        with open(path, "wb") as f:
+            f.write(png)
+        return path, bounds
+
+    def _screen_text(self, min_confidence=0.3):
+        """From the accessibility tree: exact strings, exact boxes. When the
+        tree is unavailable (uiautomator refuses a screen that never goes
+        idle) and Vision is here, read the pixels instead — slower and fuzzy,
+        but an answer. `source` says which."""
+        if time.time() < self._tree_busy_until and _VISION:
+            return self._pixel_text(min_confidence)
+        try:
+            nodes = self._tree()
+        except TreeUnavailable:
+            if not _VISION:
+                raise
+            return self._pixel_text(min_confidence)
+        out = []
+        for n in nodes:
+            s = n["text"] or n["desc"]
+            if s:
+                out.append({"text": s, "confidence": 1.0, "source": "tree",
+                            "x": n["x"], "y": n["y"], "w": n["w"], "h": n["h"]})
+        return out
+
+    def _pixel_text(self, min_confidence=0.3):
+        """Vision OCR over a screenshot. Android screenshots are 1:1 with
+        device pixels, so the boxes are tap-ready as they come."""
+        from . import ocr as _vision
+        path, bounds = self._screen_capture()
+        try:
+            rows = _vision.recognize(path, {"x": 0, "y": 0, "w": bounds["w"], "h": bounds["h"]})
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return [{**r, "source": "pixels"} for r in rows if r["confidence"] >= min_confidence]
+
+    if _VISION:
+        def _screen_text_pixels(self, min_confidence=0.3):
+            """Force pixel OCR: canvases, games, WebViews the tree cannot see."""
+            return self._pixel_text(min_confidence)
+
+    # --- input --------------------------------------------------------------
+
+    def _input_tap(self, x, y):
+        self._gate()
+        self._sh(f"input tap {int(x)} {int(y)}")
+
+    def _input_press(self, x, y, duration=0.8):
+        self._gate()
+        x, y = int(x), int(y)
+        self._sh(f"input swipe {x} {y} {x} {y} {int(duration * 1000)}")
+
+    def _input_drag(self, x1, y1, x2, y2, duration=0.35, steps=14):
+        self._gate()
+        self._sh(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} "
+                 f"{int(duration * 1000)}")
+
+    def _input_scroll(self, x, y, dy, dx=0, steps=6):
+        """A finger drag standing in for a wheel, in content space: +dy reveals
+        what is above, so the finger travels +dy pixels down (and +dx right).
+
+        It must not fling. `input swipe` lifts the finger while it is still
+        moving, so the list coasts on by a quarter of the distance and a walk
+        skips rows without any error. So: touch down, move in steps, hold
+        still, then lift. The gesture is centred on (x, y) and kept on the
+        glass, since a drag that starts at the centre and runs off the edge
+        is cut short."""
+        self._gate()
+        b = self._screen_bounds() or {}
+        w, h = b.get("w", 0), b.get("h", 0)
+        x1, y1, x2, y2 = x - dx / 2, y - dy / 2, x + dx / 2, y + dy / 2
+        if w and h:
+            keep = lambda v, size: min(max(v, size * 0.06), size * 0.94)
+            x1, x2, y1, y2 = keep(x1, w), keep(x2, w), keep(y1, h), keep(y2, h)
+        n = max(2, int(steps))
+        if self._motionevents is not False:
+            moves = " && ".join(
+                f"input motionevent MOVE {int(x1 + (x2 - x1) * i / n)} {int(y1 + (y2 - y1) * i / n)}"
+                for i in range(1, n + 1))
+            try:
+                self._sh(f"input motionevent DOWN {int(x1)} {int(y1)} && {moves} && "
+                         f"sleep 0.2 && input motionevent UP {int(x2)} {int(y2)}")
+                self._motionevents = True
+                return
+            except RuntimeError:
+                if self._motionevents:            # it has worked before: a real failure
+                    raise
+                self._motionevents = False        # an older Android without `motionevent`
+        # The fallback still lifts a moving finger; slow enough that it coasts little.
+        travel = max(abs(x2 - x1), abs(y2 - y1))
+        self._sh(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} "
+                 f"{max(600, int(travel * 4))}")
+
+    def _input_keys(self, combo):
+        self._gate()
+        parts = [p.strip().lower() for p in combo.split("+")]
+        if len(parts) > 1:
+            raise Unsupported(f"android cannot press chords ({combo!r}); "
+                              "adb keyevents are single keys")
+        k = parts[0]
+        code = _KEYS.get(k) or (k.upper() if len(k) == 1 and k.isalnum()
+                                else None)
+        if code is None:
+            raise Unsupported(f"android has no key named {combo!r}")
+        self._sh(f"input keyevent KEYCODE_{code}")
+
+    def _input_text(self, s, delay=0.03, keystrokes=False):
+        self._gate()
+        """`input text` takes one ASCII token; newlines and backspaces become
+        keyevents, spaces become %s, and the rest is shell-quoted."""
+        for i, line in enumerate(s.split("\n")):
+            if i:
+                self._sh("input keyevent KEYCODE_ENTER")
+            for j, chunk in enumerate(line.split("\b")):
+                if j:
+                    self._sh("input keyevent KEYCODE_DEL")
+                if chunk:
+                    self._sh("input text " + shlex.quote(chunk.replace(" ", "%s")))
+
+    # --- navigation ---------------------------------------------------------
+
+    def _nav_home(self):
+        self._sh("input keyevent KEYCODE_HOME")
+        time.sleep(0.5)
+
+    def _nav_back(self):
+        self._sh("input keyevent KEYCODE_BACK")
+        time.sleep(0.3)
+
+    def _nav_recents(self):
+        self._sh("input keyevent KEYCODE_APP_SWITCH")
+        time.sleep(0.5)
+
+    # --- apps ---------------------------------------------------------------
+
+    def _apps_launch(self, name):
+        """A package id, or the name a person would say. Android only knows
+        apps by package id, and plenty of ids do not contain the brand
+        ("TikTok" is com.zhiliaoapp.musically), so a name is tried as: an
+        installed id; a well-known app (_APP_IDS); a fragment of an id
+        ('chrome' -> com.android.chrome); and last the label on the launcher,
+        tapped like a person would. Returns the package launched."""
+        self._gate()
+        pkgs = self._apps_list(include_system=True)
+        want = re.sub(r"[^a-z0-9]+", "", name.lower())
+        pkg = name if name in pkgs else next(
+            (p for p in _APP_IDS.get(want, ()) if p in pkgs), None)
+        if pkg is None:
+            hits = [p for p in pkgs if want and want in p.lower().replace(".", "")]
+            # shortest match is the least-qualified, e.g. com.android.chrome
+            # over com.android.chrome.helper
+            pkg = sorted(hits, key=len)[0] if hits else None
+        if pkg is None:
+            launched = self._launch_by_label(name)
+            if launched:
+                return launched
+            raise RuntimeError(
+                f"no installed app matches {name!r}. Installed: "
+                f"{', '.join(self._apps_list()) or 'no third-party apps'}. "
+                "Pass one of these package ids.")
+        out = self._sh("cmd package resolve-activity --brief "
+                       f"-c android.intent.category.LAUNCHER {shlex.quote(pkg)}")
+        comp = next((l.strip() for l in reversed(out.splitlines())
+                     if "/" in l), None)
+        if comp is None:
+            raise RuntimeError(f"{pkg} has no launchable activity")
+        self._sh(f"am start -W -n {shlex.quote(comp)}")
+        return pkg
+
+    def _launch_by_label(self, name):
+        """Tap the icon labelled `name` on the home screen, else in the app
+        drawer. -> the package that came to the front, or None."""
+        want = name.strip().lower()
+        self._nav_home()
+        launcher = self._apps_current()
+        for opened_drawer in (False, True):
+            if opened_drawer:
+                b = self._screen_bounds() or {"w": 720, "h": 1280}
+                self._sh(f"input swipe {b['w'] // 2} {int(b['h'] * 0.8)} "
+                         f"{b['w'] // 2} {int(b['h'] * 0.25)} 250")
+                time.sleep(1.0)
+            try:
+                nodes = self._tree()
+            except RuntimeError:
+                continue
+            for n in nodes:
+                if (n["text"] or n["desc"]).strip().lower() == want:
+                    self._sh(f"input tap {n['x']} {n['y']}")
+                    for _ in range(20):
+                        time.sleep(0.25)
+                        now = self._apps_current()
+                        if now and now != launcher:
+                            return now
+        self._nav_home()
+        return None
+
+    def _apps_current(self):
+        out = self._sh("dumpsys activity activities")
+        m = (re.search(r"topResumedActivity=ActivityRecord\{[^}]*?\bu\d+ ([\w.]+)/", out)
+             or re.search(r"mResumedActivity: ActivityRecord\{[^}]*?\bu\d+ ([\w.]+)/", out))
+        return m.group(1) if m else None
+
+    def _apps_list(self, include_system=False):
+        out = self._sh("pm list packages" + ("" if include_system else " -3"))
+        return sorted(l[len("package:"):].strip()
+                      for l in out.splitlines() if l.startswith("package:"))
+
+    # --- session ------------------------------------------------------------
+
+    def _session_state(self):
+        """'ready' | 'locked' | 'unauthorized' | 'offline' | 'no-device' | 'no-adb'."""
+        from .cloud import CloudPhoneError
+        try:
+            if self._resolve() is not None:
+                try:
+                    self._gate()
+                except RuntimeError as e:
+                    if "locked" in str(e):
+                        return "locked"
+                    raise
+                return "ready"
+            states = [st for _, st, _ in _attached()]
+        except (PrimaryUnreachable, CloudPhoneError):
+            raise
+        except (RuntimeError, FileNotFoundError):
+            return "no-adb"
+        if "unauthorized" in states:
+            return "unauthorized"
+        if states:
+            return "offline"
+        return "no-device"
+
+    def _session_detail(self):
+        try:
+            return _run("devices", "-l").strip()
+        except Exception as e:
+            return str(e)
+
+    def _session_require(self):
+        """Bounds if a phone is ready, else raise telling the USER what to do
+        — plugging in, tapping Allow, and pairing are all physical."""
+        state = self._session_state()
+        if state == "ready":
+            b = self._screen_bounds()
+            if b is not None:
+                return b
+            raise RuntimeError("an Android device is attached but `wm size` "
+                               "gave no screen size; is it still booting?")
+        if state == "locked":
+            self._gate_at = 0.0
+            self._gate()                       # raises with the unlock message
+        if state == "no-adb":
+            raise RuntimeError(
+                "adb isn't available. Install Android platform-tools "
+                "(brew install android-platform-tools) or set "
+                "PHONE_HARNESS_ADB to the adb binary, then retry.")
+        if state == "unauthorized":
+            raise RuntimeError(
+                "The Android phone is attached but hasn't authorised this "
+                "computer. Unlock it and tap Allow on the 'Allow USB "
+                "debugging?' prompt (tick 'Always allow'), then retry.")
+        if state == "offline":
+            raise RuntimeError(
+                "adb sees the Android device but it is offline. Unplug and "
+                "replug it (or toggle Wireless debugging off and on), then retry.")
+        cfg = _load()
+        prim = cfg.get("primary")
+        known = (f" Your primary phone is '{prim}' — make sure Wireless "
+                 "debugging is on and it is on this Wi-Fi; if it forgot this "
+                 "Mac, pair again." if prim else "")
+        raise RuntimeError(
+            "No Android device is reachable." + known + " To connect one: "
+            "USB — Settings > Developer options > USB debugging, plug in, tap "
+            "Allow. Wi-Fi — Developer options > Wireless debugging > Pair "
+            "device with pairing code, then `phone-harness android pair "
+            "CODE`. Then retry.")
+
+    def _session_refocus(self):
+        return None                    # adb needs nothing in front
+
+    # --- interruption -------------------------------------------------------
+
+    def _focus_probe(self):
+        return (True,)                 # frontmost: adb is never occluded
+
+    def _focus_diff(self, before, after):
+        return {"raised": False, "stole_focus": False}
+
+    # --- tree / raw ---------------------------------------------------------
+
+    def _tree(self):
+        """[{text, desc, id, class, clickable, x, y, w, h}] from
+        `uiautomator dump`. uiautomator waits about ten seconds for the UI to
+        go idle and then refuses ("could not get idle state"); a screen that
+        never idles — a playing video, some Settings pages — answers that
+        every time, so it is asked once and remembered. Other failures (a
+        transition mid-dump, a truncated tree) are retried briefly."""
+        self._screen_require()
+        self._gate()
+        last = None
+        for i in range(3):
+            try:
+                raw = self._adb("exec-out", "uiautomator", "dump", "/dev/tty",
+                                binary=True, timeout=30)
+                start = raw.find(b"<?xml")
+                if start < 0:                        # uiautomator printed an error, not a tree
+                    last = raw.decode(errors="replace").strip() or "empty dump"
+                    if "idle" in last:
+                        self._tree_busy_until = time.time() + _TREE_BUSY_FOR
+                        raise TreeUnavailable(
+                            "the accessibility tree is not available on this screen "
+                            "(uiautomator: could not get idle state). Read it from "
+                            "screenshot() instead.")
+                    raise ValueError(last)
+                xml = raw[start:raw.rfind(b">") + 1]
+                root = ET.fromstring(xml)
+                self._tree_busy_until = 0.0
+                break
+            except (RuntimeError, ValueError, ET.ParseError) as e:
+                if isinstance(e, TreeUnavailable):
+                    raise
+                last = str(e)
+                time.sleep(0.5 * (i + 1))          # 0.5, 1s: a transition settles
+        else:
+            raise RuntimeError(f"uiautomator dump failed: {last}")
+        nodes = []
+        for el in root.iter("node"):
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", el.get("bounds", ""))
+            if not m:
+                continue
+            x1, y1, x2, y2 = map(int, m.groups())
+            nodes.append({
+                "text": el.get("text", ""), "desc": el.get("content-desc", ""),
+                "id": el.get("resource-id", ""),
+                "class": el.get("class", ""),
+                "clickable": el.get("clickable") == "true",
+                "x": (x1 + x2) // 2, "y": (y1 + y2) // 2,
+                "w": x2 - x1, "h": y2 - y1,
+            })
+        return nodes
+
+    def _raw(self, cmd, binary=False, timeout=60):
+        """`adb shell <cmd>` — the escape hatch."""
+        self._screen_require()
+        return self._adb("shell", cmd, binary=binary, timeout=timeout)
+
+
+# --- CLI (phone-harness android ...) ----------------------------------------
+
+CLI_USAGE = """Usage:
+  phone-harness android                          known phones, primary, what's live
+  phone-harness android pair [CODE] [NAME]       Wireless debugging: pair with the 6-digit
+                                                 code (phone found over mDNS), connect, remember
+  phone-harness android pair IP:PORT CODE [NAME] the same, if mDNS is blocked on your network
+  phone-harness android connect [NAME|IP:PORT]   connect a paired phone (default: primary, via mDNS)
+  phone-harness android use NAME                 make NAME the primary
+  phone-harness android forget NAME
+  phone-harness android awake [--bg] [--no-mirror]
+        keep the phone awake for a session (and mirror it if scrcpy is
+        installed); changes no phone settings - ends with rest, Ctrl-C, or
+        closing the mirror. --bg detaches.
+  phone-harness android rest                     end the session; the phone sleeps
+"""
+
+def _pidfile():
+    return config.run_dir() / "awake.pid"
+
+
+def _poke_every():
+    return max(5, int(config.get("android.poke_every")))   # shortest phone timeout is 15s
+POKE = "input keyevent KEYCODE_UNKNOWN"   # counts as user activity; no app sees it
+
+
+def _phone_label(adb_id):
+    """The registry name for the phone behind adb_id, else its model."""
+    try:
+        serial = _prop(adb_id, "ro.serialno")
+        for name, p in (_load().get("phones") or {}).items():
+            if p.get("serial") == serial:
+                return name
+        return _prop(adb_id, "ro.product.model") or adb_id
+    except RuntimeError:
+        return adb_id
+
+
+def _awake(mirror=True):
+    """The session companion. Wakes the phone; waits for the user to unlock
+    if it is locked; then every android.poke_every seconds sends a keypress no app
+    reacts to, which the phone counts as user activity — so it never
+    reaches its screen timeout while this runs, on USB or Wi-Fi, charging
+    or not, and reverts to normal the instant this stops. No setting is
+    written. Pokes pause while the phone is locked (a lock screen should be
+    allowed to go dark). If scrcpy is installed, mirrors the same phone in
+    a window titled with its name; closing that window ends the session."""
+    phone = Android()
+    adb_id = phone._resolve()
+    if adb_id is None:
+        phone._session_require()               # raises with the physical step
+    label = _phone_label(adb_id)
+    print(f"awake: {label} ({adb_id})", flush=True)
+    proc = None
+    if mirror and shutil.which("scrcpy"):
+        proc = subprocess.Popen(
+            ["scrcpy", "-s", adb_id, "--stay-awake", "--no-audio",
+             "--always-on-top", "--window-title", f"phone-harness: {label}",
+             "--window-width", "360"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("mirror: scrcpy window open (close it to end)", flush=True)
+    elif mirror:
+        print(term.note("mirror: scrcpy not installed (brew install scrcpy) — keeping "
+                        "awake without a window"), flush=True)
+
+    def stop(*_):
+        if proc and proc.poll() is None:
+            proc.terminate()
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        was_locked = None
+        while True:
+            if proc and proc.poll() is not None:
+                print("mirror closed — ending", flush=True)
+                return 0
+            try:
+                awake, locked = phone._screen_status()
+            except RuntimeError:
+                print("phone gone — ending", flush=True)
+                return 0
+            if not awake and was_locked is not False:
+                phone._sh("input keyevent KEYCODE_WAKEUP")
+                awake, locked = phone._screen_status()
+            if locked:
+                if was_locked is not True:
+                    print(term.note("locked — unlock the phone to continue (pokes paused)"),
+                          flush=True)
+                was_locked = True
+            else:
+                if was_locked is not False:
+                    print("unlocked — keeping awake", flush=True)
+                was_locked = False
+                phone._sh(POKE)
+            time.sleep(_poke_every() if not locked else 3)
+    finally:
+        if proc and proc.poll() is None:
+            proc.terminate()
+        try:
+            _pidfile().unlink()
+        except OSError:
+            pass
+
+
+def _awake_pid():
+    """pid of a running awake session (not ourselves), else None."""
+    try:
+        pid = int(_pidfile().read_text().strip())
+        if pid == os.getpid():
+            return None
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+
+def _connect_serial(serial, timeout=10):
+    """Find `serial` on the LAN and adb-connect it; -> adb id or None."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for s in _mdns():
+            if s["serial"] == serial:
+                out = _run("connect", s["addr"], timeout=15, check=False)
+                if "connected" in out and "cannot" not in out:
+                    return s["addr"]
+        time.sleep(1)
+    return None
+
+
+def _android_parsers():
+    """One argparse parser per subcommand, for --help and unknown flags.
+
+    The command body still reads the original words. `--fg` is how
+    `awake --bg` re-enters this process; it is accepted and not shown.
+    """
+    def make(name, usage, description):
+        return term.Parser(
+            prog=f"phone-harness android {name}",
+            usage=usage,
+            description=description,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+
+    parsers = {}
+    awake = make("awake", "phone-harness android awake [--bg] [--no-mirror]",
+                 "Keep the phone awake for a session, and mirror it when scrcpy "
+                 "is installed. Changes no phone settings. Ends with rest, Ctrl-C, "
+                 "or closing the mirror.")
+    awake.add_argument("--bg", action="store_true", help="detach and keep running")
+    awake.add_argument("--no-mirror", action="store_true", help="do not open a scrcpy window")
+    awake.add_argument("--fg", action="store_true", help=argparse.SUPPRESS)
+    parsers["awake"] = awake
+
+    parsers["rest"] = make("rest", "phone-harness android rest",
+                           "End the awake session and let the phone sleep.")
+
+    parsers["pair"] = make(
+        "pair",
+        "phone-harness android pair [CODE] [NAME] | phone-harness android pair IP:PORT CODE [NAME]",
+        "Wireless debugging. With a 6-digit code, the phone is found over mDNS. "
+        "Pass IP:PORT when mDNS is blocked; both values are on the pairing dialog.")
+
+    parsers["connect"] = make(
+        "connect", "phone-harness android connect [NAME|IP:PORT]",
+        "Connect a paired phone. With no name, connect the primary over mDNS.")
+
+    parsers["use"] = make("use", "phone-harness android use NAME",
+                          "Make NAME the primary phone.")
+
+    parsers["forget"] = make("forget", "phone-harness android forget NAME",
+                             "Forget a paired phone.")
+    return parsers
+
+
+def cli(args):
+    try:
+        return _cli(list(args))
+    except SystemExit as e:
+        if isinstance(e.code, str):
+            print(term.err(e.code), file=sys.stderr)
+            return 1
+        raise
+
+
+def _cli(args):
+    if args[:1] in (["-h"], ["--help"]):
+        print(CLI_USAGE)
+        return 0
+    cmd = args[0] if args else None
+    if cmd is not None:
+        parser = _android_parsers().get(cmd)
+        if parser is None:
+            _load()
+            print(CLI_USAGE)
+            return 2
+        term.reject_unknown_flags(parser, args[1:])
+    cfg = _load()
+    phones = cfg.get("phones") or {}
+
+    if cmd is None:
+        live = {a: (st, tr) for a, st, tr in _attached()}
+        print(f"primary: {cfg.get('primary') or '(none)'}   devices: {config.paths()['devices']}")
+        for name, p in phones.items():
+            mark = "*" if name == cfg.get("primary") else " "
+            print(f" {mark} {name:<16} {p.get('model') or '?':<18} serial {p.get('serial')}"
+                  f"   last {p.get('last_host') or '-'} @ {p.get('last_seen', '-')[:16]}")
+        print("attached now:", ", ".join(f"{a} ({st}, {tr})" for a, (st, tr) in live.items())
+              or "nothing")
+        lan = _mdns()
+        if lan:
+            print("paired phones on this Wi-Fi:",
+                  ", ".join(f"{s['serial']}@{s['addr']}" for s in lan))
+        pid = _awake_pid()
+        print(f"awake session: {'running (pid %d) — phone-harness android rest to end' % pid if pid else 'off'}")
+        return 0
+
+    if cmd == "awake":
+        if _awake_pid():
+            print(f"already awake (pid {_awake_pid()}); phone-harness android rest to end")
+            return 0
+        mirror = "--no-mirror" not in args and bool(config.get("android.mirror"))
+        if "--bg" in args:
+            child = subprocess.Popen(
+                [sys.executable, "-m", "phone_harness.run", "android", "awake",
+                 "--fg"] + (["--no-mirror"] if not mirror else []),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            _pidfile().parent.mkdir(parents=True, exist_ok=True)
+            _pidfile().write_text(str(child.pid))
+            time.sleep(2)
+            if child.poll() is None:
+                print(f"awake in background (pid {child.pid}); phone-harness android rest to end")
+            else:
+                print(term.err("awake exited at once — is a phone connected? try without --bg",
+                               sys.stdout))
+            return 0 if child.poll() is None else 1
+        _pidfile().parent.mkdir(parents=True, exist_ok=True)
+        _pidfile().write_text(str(os.getpid()))
+        return _awake(mirror=mirror)
+
+    if cmd == "rest":
+        pid = _awake_pid()
+        if pid:
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(20):
+                if _awake_pid() is None:
+                    break
+                time.sleep(0.2)
+            print("awake session ended")
+        else:
+            print("no awake session running")
+        try:
+            phone = Android()
+            if phone._resolve() is not None:
+                phone._sh("input keyevent KEYCODE_SLEEP", timeout=10)
+                print("phone put to sleep")
+        except RuntimeError as e:
+            print(term.err(f"(could not put the phone to sleep: {e})", sys.stdout))
+        return 0
+
+    if cmd == "pair":
+        # Forms: pair | pair CODE [NAME] | pair IP:PORT CODE [NAME]
+        rest_ = args[1:]
+        if rest_ and ":" in rest_[0]:
+            if len(rest_) < 2:
+                print(CLI_USAGE); return 2
+            addr, code, name = rest_[0], rest_[1], (rest_[2] if len(rest_) > 2 else None)
+        else:
+            code = rest_[0] if rest_ else None
+            name = rest_[1] if len(rest_) > 1 else None
+            print("On the phone: Settings > Developer options > Wireless debugging "
+                  "(on) > 'Pair device with pairing code'. Keep that dialog open.")
+            if not code:
+                try:
+                    code = input("6-digit pairing code shown on the phone: ").strip()
+                except EOFError:
+                    print(CLI_USAGE); return 2
+            print(term.note("looking for the phone on this Wi-Fi..."), flush=True)
+            addr = None
+            for _ in range(45):                       # the dialog advertises itself
+                hits = _mdns("pairing")
+                if hits:
+                    addr = hits[0]["addr"]; break
+                time.sleep(1)
+            if addr is None:
+                print(term.err("no phone is offering to pair on this network. Is Wireless "
+                               "debugging on, the pairing dialog open, and the phone on the "
+                               "same Wi-Fi as this Mac? If your network blocks mDNS, use: "
+                               "phone-harness android pair IP:PORT CODE (both shown in the dialog)",
+                               sys.stdout))
+                return 1
+        out = _run("pair", addr, code, timeout=30, check=False)
+        if "Successfully paired" not in out:
+            print(term.err(out.strip() or "pairing failed", sys.stdout))
+            return 1
+        host = addr.rpartition(":")[0]
+        # the connect port differs from the pairing port; find it via mDNS
+        adb_id = None
+        for _ in range(10):
+            hit = next((s for s in _mdns() if s["host"] == host), None)
+            if hit:
+                o = _run("connect", hit["addr"], timeout=15, check=False)
+                if "connected" in o and "cannot" not in o:
+                    adb_id = hit["addr"]; break
+            time.sleep(1)
+        if adb_id is None:
+            print(term.err("paired, but could not find the phone's connect port on this "
+                           "network yet. Turn Wireless debugging off and on, then: "
+                           "phone-harness android connect IP:PORT  (the port shown on "
+                           "the Wireless debugging screen)", sys.stdout))
+            return 1
+        serial, model = _prop(adb_id, "ro.serialno"), _prop(adb_id, "ro.product.model")
+        key = _remember(cfg, serial, model, host=host, name=name, primary=True)
+        cfg = _load()
+        print(f"paired and connected: {model} as '{key}' ({adb_id})"
+              + ("  — now the primary" if cfg.get("primary") == key else ""))
+        if config.get("platform") != "android":
+            print(term.note("tip: `phone-harness config set platform android` makes Android "
+                            "the default, so nothing needs PHONE_HARNESS_PLATFORM=android"))
+        return 0
+
+    if cmd == "connect":
+        target = args[1] if len(args) > 1 else cfg.get("primary")
+        if not target:
+            print(term.err("no primary phone yet — pair one first", sys.stdout))
+            return 1
+        if ":" in target:
+            out = _run("connect", target, timeout=15, check=False)
+            text = out.strip()
+            ok = "connected" in out and "cannot" not in out
+            print(text if ok else term.err(text, sys.stdout))
+            return 0 if ok else 1
+        p = phones.get(target)
+        if not p:
+            print(term.err(f"unknown phone {target!r}; known: {', '.join(phones) or 'none'}",
+                           sys.stdout))
+            return 1
+        adb_id = _connect_serial(p["serial"])
+        if adb_id is None:
+            print(term.err(f"'{target}' isn't announcing on this Wi-Fi. Is Wireless "
+                           "debugging on, and the phone on the same network?", sys.stdout))
+            return 1
+        _remember(cfg, p["serial"], p.get("model"), host=adb_id.rpartition(":")[0],
+                  primary=True)
+        print(f"connected: {target} ({adb_id})"); return 0
+
+    if cmd == "use":
+        if len(args) < 2 or args[1] not in phones:
+            print(f"known phones: {', '.join(phones) or 'none'}"); return 2
+        cfg["primary"] = args[1]; _store(cfg)
+        print(f"primary: {args[1]}"); return 0
+
+    if cmd == "forget":
+        if len(args) < 2 or args[1] not in phones:
+            print(f"known phones: {', '.join(phones) or 'none'}"); return 2
+        phones.pop(args[1])
+        if cfg.get("primary") == args[1]:
+            cfg["primary"] = next(iter(phones), None)
+        _store(cfg); print(f"forgot {args[1]}"); return 0
+
+    print(CLI_USAGE)
+    return 2

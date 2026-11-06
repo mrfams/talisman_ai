@@ -1,0 +1,53 @@
+[project]
+name = "phone-harness"
+version = "0.3.3"
+description = "Let an agent drive a real phone: an iPhone through macOS iPhone Mirroring, an Android over adb, a rented cloud Android, or a cloud iPhone over HTTPS"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+keywords = ["iphone", "android", "adb", "automation", "agent", "iphone-mirroring", "cloud-phone"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    # iPhone control (iPhone Mirroring, Vision OCR) needs macOS. Android is
+    # plain adb and installs everywhere; these are skipped off macOS.
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+]
+
+[project.urls]
+Homepage = "https://phone-harness.com"
+Repository = "https://github.com/phone-harness/phone-harness"
+Documentation = "https://phone-harness.com/docs"
+Issues = "https://github.com/phone-harness/phone-harness/issues"
+
+[project.scripts]
+phone-harness = "phone_harness.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phone_harness"]
+
+# Shipped inside the package so an install works without a checkout.
+# agent-workspace/ stays the only copy in the repo; the wheel maps its
+# default file to phone_harness/agent_workspace/. Only that file is
+# packed: a .env or scratch file beside it must never ride along.
+[tool.hatch.build.targets.wheel.force-include]
+"SKILL.md" = "phone_harness/SKILL.md"
+"agent-workspace/agent_helpers.py" = "phone_harness/agent_workspace/agent_helpers.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/phone_harness", "SKILL.md", "onboarding.md", "README.md", "LICENSE", "install.md", "setup", "agent-workspace/agent_helpers.py"]
