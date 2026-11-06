@@ -46,6 +46,8 @@ import { CredentialStore } from "../connectors/store.js";
 import { GoogleCalendar, type GoogleTokens } from "../connectors/google.js";
 import { signState, verifyState } from "../connectors/oauth-state.js";
 import { calendarTools } from "../connectors/calendar-tools.js";
+import { createPhone, isPhoneOp, PHONE_OPS } from "../connectors/phone.js";
+import { phoneTools } from "../connectors/phone-tools.js";
 import type { ModelRouter } from "../intelligence/router.js";
 import { Agent, type AgentTool } from "../intelligence/agent.js";
 import type { ChatMessage } from "../intelligence/types.js";
@@ -148,6 +150,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       clientId: deps.config.googleClientId,
       clientSecret: deps.config.googleClientSecret,
     });
+  const phone = createPhone(deps.config);
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -320,6 +323,44 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.json({ members });
   });
 
+  /* ---------------------------------------------------------------- devices */
+
+  app.get("/api/devices", async (c) => {
+    requireUser(c);
+    if (!phone) {
+      return c.json({
+        configured: false,
+        devices: [],
+        ops: PHONE_OPS,
+        hint: "Set PHONE_HARNESS_API_KEY, or PHONE_BRIDGE_URL and PHONE_BRIDGE_TOKEN.",
+      });
+    }
+    const status = await phone.status();
+    return c.json({ configured: true, devices: [status], ops: PHONE_OPS });
+  });
+
+  app.post("/api/devices/op", async (c) => {
+    requireUser(c);
+    if (!phone) throw errors.unavailable("No phone is configured for this deployment.");
+    const body = z
+      .object({
+        op: z.string(),
+        kw: z.record(z.string(), z.unknown()).default({}),
+      })
+      .parse(await c.req.json());
+    if (!isPhoneOp(body.op)) throw errors.invalid(`Unsupported phone op: ${body.op}`);
+    const result = await phone.send(body.op, body.kw, c.req.raw.signal);
+    if (body.op === "screen.capture") {
+      const box =
+        result && typeof result === "object" && "result" in result
+          ? (result as { result: unknown }).result
+          : result;
+      const record = (box ?? {}) as Record<string, unknown>;
+      return c.json({ png_b64: record.png_b64 ?? record.png ?? null, bounds: record.bounds ?? null });
+    }
+    return c.json({ result });
+  });
+
   /* ------------------------------------------------------- conversations */
 
   app.get("/api/conversations", async (c) => {
@@ -475,6 +516,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         orgId: user.orgId,
         userId: user.id,
       }),
+      ...phoneTools({ phone }),
     ];
 
     const agent = new Agent(deps.models, tools);

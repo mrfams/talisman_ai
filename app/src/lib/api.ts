@@ -136,6 +136,14 @@ export interface Member {
   createdAt: string;
 }
 
+export interface PhoneStatus {
+  kind: "cloud" | "bridge";
+  label: string;
+  ready: boolean;
+  detail: string;
+  ops?: string[];
+}
+
 export interface Connector {
   id: string;
   name: string;
@@ -239,6 +247,16 @@ export const api = {
     request<{ approvals: ApprovalWithTask[] }>(`/api/approvals?status=${status}`),
   activity: () => request<{ events: AuditEntry[] }>("/api/activity"),
   team: () => request<{ members: Member[] }>("/api/team"),
+
+  devices: () =>
+    request<{ configured: boolean; devices: PhoneStatus[]; ops: string[]; hint?: string }>(
+      "/api/devices",
+    ),
+  deviceOp: (op: string, kw: Record<string, unknown> = {}) =>
+    request<{ png_b64?: string | null; bounds?: unknown; result?: unknown }>("/api/devices/op", {
+      method: "POST",
+      body: body({ op, kw }),
+    }),
 
   connectors: () => request<ConnectorState>("/api/connectors"),
   authorizeGoogle: () => request<{ url: string }>("/api/connectors/google/authorize"),

@@ -15,6 +15,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Smartphone,
   Sun,
   Users,
 } from "lucide-react";
@@ -29,6 +30,7 @@ const NAV = [
   { to: "/approvals", label: "Approvals", icon: ShieldCheck },
   { to: "/artifacts", label: "Artifacts", icon: Package },
   { to: "/connectors", label: "Connectors", icon: Plug },
+  { to: "/devices", label: "Devices", icon: Smartphone },
   { to: "/activity", label: "Activity", icon: Activity },
   { to: "/team", label: "Team", icon: Users },
   { to: "/settings", label: "Settings", icon: Settings },
@@ -49,6 +51,7 @@ const TITLES: Record<string, string> = {
   "/approvals": "Approvals",
   "/artifacts": "Artifacts",
   "/connectors": "Connectors",
+  "/devices": "Devices",
   "/activity": "Activity",
   "/team": "Team",
   "/settings": "Settings",

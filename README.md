@@ -5,8 +5,9 @@ capabilities. Talisman keeps its own intelligence layer (no CopilotKit
 Intelligence) and runs the same code on a long-lived Node host or as a serverless
 function on Vercel.
 
-**Live deployment: <https://talisman-agent.vercel.app>** — sign up, create a task,
-and the console drives its execution and shows the finished PDF.
+**Live deployment: <https://talisman-agent.vercel.app>** — sign up and hand the
+agent a job: chat streams, runs are visible step by step, and the files it
+produces land in the artifact library.
 
 Evidence and status live in [`docs/CAPABILITY-MAP.md`](docs/CAPABILITY-MAP.md);
 the upstream inventory is in [`docs/INVENTORY.md`](docs/INVENTORY.md); decisions are
@@ -41,8 +42,14 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
 - A Google Calendar connector: real OAuth with refresh tokens, per-user encrypted
   tokens, `calendar_list_events` and `calendar_create_event` tools, and an
   approval gate on anything that writes to the user's calendar.
-- A web console at `/`, unit/integration tests, a real-Chrome end-to-end test, a
-  live deployment check, and CI.
+- A real application at `/`: Today, streaming Chat, Runs and run detail,
+  Artifacts, Approvals, Connectors, Devices, Activity, Team and Settings, in light
+  and dark themes on desktop and mobile.
+- Phone control over Phone Harness (MIT, vendored): a cloud phone through its
+  HTTPS control API, or your own iPhone/Android through a local bridge, with five
+  agent tools and approval on every tap that can send or submit.
+- Unit/integration tests, a real-Chrome end-to-end test, a live deployment check,
+  and CI.
 
 Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
 connectors, goals and monitors, semantic memory and AG-UI. See the capability
@@ -110,9 +117,9 @@ src/documents   report composition, PDF render, verification
 src/workspace   per-task workspace, filesystem and Postgres artifact stores
 src/api         Hono app and server
 src/worker      durable worker loop for long-running hosts
+app             React application (Vite), built to app/dist
 api             Vercel serverless entry point
-public          console
-scripts         live deployment check, test Postgres helper
+scripts         live deployment check, phone bridge, test Postgres helper
 tests           unit, integration, API and real-browser E2E
 vendor          upstream source, unmodified, with licences
 docs            capability matrix, inventory, decisions, security, deployment
@@ -121,8 +128,10 @@ docs            capability matrix, inventory, decisions, security, deployment
 ## Checks
 
 ```bash
-npm run typecheck        # tsc --noEmit
-npm run test:unit        # 22 unit/integration tests; needs Postgres
+npm run typecheck        # tsc --noEmit (server)
+npm run typecheck:app    # tsc -p app/tsconfig.json
+npm run build:app        # vite build -> app/dist
+npm run test:unit        # 31 unit/integration tests; needs Postgres
 npm run test:browser     # real Chrome + PDF, no database needed
 npm run test:e2e         # research task through the durable engine
 BASE=https://talisman-agent.vercel.app node scripts/e2e-live.mjs
@@ -130,30 +139,35 @@ BASE=https://talisman-agent.vercel.app node scripts/e2e-live.mjs
 
 Verified on 6 November 2026:
 
-- `tsc --noEmit` clean.
-- **27 unit and integration tests pass**: auth (4), tenant isolation (3), task
+- `tsc --noEmit` and `tsc -p app/tsconfig.json` clean; `vite build` produces
+  114 KB gzip JS and 5.5 KB gzip CSS.
+- **31 unit and integration tests pass**: auth (4), tenant isolation (3), task
   lifecycle and retries (5), serverless slices and Postgres artifacts (4),
-  credential encryption and the Google Calendar connector (5), intelligence (5),
-  API (1). The combined run under `--test-force-exit` can report a file-level
-  teardown error on this memory-constrained machine; every file passes when the
-  runner is allowed to exit normally.
-- **14/14 live checks pass** against the deployment: health, anonymous
+  credential encryption and the Google Calendar connector (5), phone transport
+  and tools (4), intelligence (5), API (1). The combined run under
+  `--test-force-exit` can report a file-level teardown error on this
+  memory-constrained machine; every file passes when the runner is allowed to
+  exit normally.
+- **21/21 live checks pass** against the deployment: health, anonymous
   rejection, signup, cross-origin mutation refused, task created, task
   succeeded, all four steps succeeded, PDF downloaded and parsed (1 page, hash
   matches the stored digest), cross-tenant task and artifact access refused,
-  finished task not re-executed, connector encryption enabled, and an
-  unconnected connector refusing to execute. Run with
-  `node scripts/e2e-live.mjs`.
+  finished task not re-executed, connector encryption enabled, an unconnected
+  connector refusing to execute, the artifact library, the approvals inbox, the
+  audit log, the team list, the phone registry answering honestly, and client
+  routes serving the application shell. Run with `node scripts/e2e-live.mjs`.
 - A real-Chrome run and a research task through the durable engine passed in the
   previous session (`tests/browser.smoke.test.ts`, `tests/e2e.research.test.ts`)
   and were not re-run here.
 
 The live run used real public pages through the HTTP reader and the APInex free
 model tier. It did not exercise a JavaScript-rendered page, a remote CDP browser,
-live web search, or a real Google account. The Calendar connector is verified
-end to end against a fake Google OAuth and Calendar server; a real Google call
-needs your own OAuth client (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`) and one
-consent click, after which "Test connection" returns real events.
+live web search, a real Google account, or a real phone. The Calendar connector
+is verified end to end against a fake Google OAuth and Calendar server; a real
+Google call needs your own OAuth client (`GOOGLE_CLIENT_ID` /
+`GOOGLE_CLIENT_SECRET`) and one consent click. Phone control is verified against
+a fake control service and a fake bridge; a real phone needs
+`PHONE_HARNESS_API_KEY`, or the bridge running next to your own device.
 
 ## Attribution
 

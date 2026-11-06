@@ -11,6 +11,7 @@ import { Artifacts } from "./pages/Artifacts";
 import { Approvals } from "./pages/Approvals";
 import { Activity } from "./pages/Activity";
 import { Team } from "./pages/Team";
+import { Devices } from "./pages/Devices";
 import { Settings } from "./pages/Settings";
 import { NotFound } from "./pages/NotFound";
 
@@ -46,6 +47,7 @@ export function App() {
           <Route path="activity" element={<Activity />} />
           <Route path="team" element={<Team />} />
           <Route path="connectors" element={<Connectors />} />
+          <Route path="devices" element={<Devices />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>

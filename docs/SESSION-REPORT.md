@@ -1,5 +1,62 @@
 # Session report — 5–6 November 2026
 
+## Milestone 4 — a real application, and phones (6 November 2026)
+
+Objective: replace a 395-line single-page console with a shippable application,
+and add the phone harness the product needs.
+
+### The interface
+
+| Area | What shipped |
+| --- | --- |
+| Stack | React 19, Vite, TypeScript, React Router, TanStack Query, Motion, lucide; hand-written CSS tokens instead of a component library skin |
+| Design | Ink/paper themes, periwinkle→mint accent, Instrument Sans + JetBrains Mono self-hosted (30 KB + 40 KB), one dither signature, 120/180/260 ms motion |
+| Shell | Rail + mobile tabs, ⌘K palette, theme switch, degraded-runtime awareness |
+| Pages | Sign in/up, Today, Chat (SSE), Runs + run detail, Artifacts, Approvals, Connectors, Devices, Activity, Team, Settings, 404 |
+| Serving | Vercel builds `app/` to `app/dist`; SPA rewrite for client routes; `/api/*` unchanged |
+
+Measured: `app/dist/assets/index-*.js` **114 KB gzip**, CSS **5.5 KB gzip**, build 1.6 s.
+
+### Backend added for those pages
+
+`GET /api/artifacts`, `/api/approvals`, `/api/activity` (owner/admin only),
+`/api/team`, `/api/devices`, `POST /api/devices/op`. Every query runs inside the
+existing tenant transaction, so RLS still applies to the new read models.
+
+### Phones
+
+Phone Harness (MIT, `vendor/phone-harness`, pinned `4bebff1`) is vendored whole
+(80 tracked files), credited in `NOTICE`, and designed in `docs/PHONE-HARNESS.md`.
+`CloudPhone` speaks the documented `/me` → `POST /sessions` → `control.url/op` flow;
+`BridgePhone` speaks to `scripts/phone-bridge.mjs`, which shells to the CLI on the
+machine that can actually see the phone. Five agent tools map 1:1 to harness ops;
+four of them require approval.
+
+### Tests actually run
+
+```
+npx tsc --noEmit                                   exit 0
+npx tsc -p app/tsconfig.json                       exit 0
+npm run build:app                                  exit 0
+31 unit/integration tests                          30 pass
+```
+
+The one failure is the known `--test-force-exit` teardown artifact on
+`tests/intelligence.test.ts`, which passes 5/5 alone. `tests/phone.test.ts` is 4/4:
+cloud session start + control-token routing + screenshot, rejected key, bridge
+health/op, tool approval flags and tap-by-label. All against fake HTTP services.
+
+### Not verified
+
+- **No real phone.** No cloud key and no bridge in this environment, so the live
+deployment reports `configured:false`. The ops are exercised against a fake
+control service, not a device.
+- Invitations still need an email sender; the Team page says so instead of
+pretending.
+- Password reset is not built yet.
+
+---
+
 ## Milestone 3 — credential encryption and Google Calendar (6 November 2026)
 
 Objective: store connector credentials safely, then wire one real external

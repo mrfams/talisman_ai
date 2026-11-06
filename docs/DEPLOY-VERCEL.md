@@ -49,6 +49,10 @@ panel is open, and the daily cron drains anything left behind.
 | `TALISMAN_MAX_RUN_MS` | optional | Slice budget, default 45000. Keep below the function's `maxDuration`. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | for Calendar | OAuth client (type: Web application). |
 | `GOOGLE_REDIRECT_URI` | optional | Defaults to `<request origin>/api/connectors/google/callback`. |
+| `PHONE_HARNESS_API_KEY` | for cloud phones | Server-side key for api.phone-harness.com. |
+| `PHONE_HARNESS_CLOUD_API` | optional | Host override for tests or a self-hosted instance. |
+| `PHONE_BRIDGE_URL` / `PHONE_BRIDGE_TOKEN` | for your own phone | The bridge in `scripts/phone-bridge.mjs` must be reachable from Vercel over HTTPS. |
+| `PHONE_DEFAULT_DEVICE` | optional | Device id used when several cloud phones are available. |
 
 `vercel.json` sets `maxDuration: 60` and `memory: 1024` for the function, and
 bundles `src/db/schema.sql` with it.

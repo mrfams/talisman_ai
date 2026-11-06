@@ -39,6 +39,11 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().optional(),
+  PHONE_HARNESS_API_KEY: z.string().optional(),
+  PHONE_HARNESS_CLOUD_API: z.string().optional(),
+  PHONE_BRIDGE_URL: z.string().optional(),
+  PHONE_BRIDGE_TOKEN: z.string().optional(),
+  PHONE_DEFAULT_DEVICE: z.string().optional(),
   /** Wall-clock budget for one execution slice, in milliseconds. */
   TALISMAN_MAX_RUN_MS: z.coerce.number().int().positive().max(120_000).default(45_000),
   WORKER_ID: z.string().default("worker-1"),
@@ -79,6 +84,11 @@ export interface Config {
   googleClientId: string | null;
   googleClientSecret: string | null;
   googleRedirectUri: string | null;
+  phoneHarnessApiKey: string | null;
+  phoneCloudApi: string | null;
+  phoneBridgeUrl: string | null;
+  phoneBridgeToken: string | null;
+  phoneDefaultDevice: string | null;
   maxRunMs: number;
   workerId: string;
   workerConcurrency: number;
@@ -149,6 +159,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     googleClientId: parsed.GOOGLE_CLIENT_ID ?? null,
     googleClientSecret: parsed.GOOGLE_CLIENT_SECRET ?? null,
     googleRedirectUri: parsed.GOOGLE_REDIRECT_URI ?? null,
+    phoneHarnessApiKey: parsed.PHONE_HARNESS_API_KEY ?? null,
+    phoneCloudApi: parsed.PHONE_HARNESS_CLOUD_API ?? null,
+    phoneBridgeUrl: parsed.PHONE_BRIDGE_URL ?? null,
+    phoneBridgeToken: parsed.PHONE_BRIDGE_TOKEN ?? null,
+    phoneDefaultDevice: parsed.PHONE_DEFAULT_DEVICE ?? null,
     maxRunMs: parsed.TALISMAN_MAX_RUN_MS,
     workerId: parsed.WORKER_ID,
     workerConcurrency: parsed.WORKER_CONCURRENCY,

@@ -197,6 +197,21 @@ const run = async () => {
     `${team.json?.members?.length ?? 0} member(s)`,
   );
 
+  const devices = await call("/api/devices", { cookie: alice.cookie });
+  record(
+    "device registry answers honestly",
+    devices.status === 200 && typeof devices.json?.configured === "boolean",
+    `configured: ${devices.json?.configured}`,
+  );
+
+  const devicesRoute = await fetch(`${base}/devices`, { headers: { accept: "text/html" } });
+  const devicesHtml = await devicesRoute.text();
+  record(
+    "devices route serves the app shell",
+    devicesRoute.status === 200 && devicesHtml.includes('id="root"'),
+    `HTTP ${devicesRoute.status}`,
+  );
+
   const shell = await fetch(`${base}/chat`, { headers: { accept: "text/html" } });
   const shellHtml = await shell.text();
   record(

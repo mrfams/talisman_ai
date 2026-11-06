@@ -42,6 +42,10 @@ the strength of a README or of source being present.
 | Connector OAuth state | `src/connectors/oauth-state.ts` | VERIFIED | forged state returns 403; expiry and redirect URI pinned |
 | Google Calendar: list events | `src/connectors/google.ts`, `calendar_list_events` | INTEGRATED | `tests/connectors.test.ts` against a fake Google backend; **not** verified against real Google |
 | Google Calendar: create event | `calendar_create_event`, approval required | INTEGRATED | same test; approval gate covered by `tests/intelligence.test.ts` |
+| Phone control: cloud | `src/connectors/phone.ts` (`CloudPhone`) over the documented `/me` → `/sessions` → `control.url/op` flow | INTEGRATED | `tests/phone.test.ts` against a fake control service over real HTTP; **no live cloud phone has been driven** |
+| Phone control: your own device | `BridgePhone` + `scripts/phone-bridge.mjs` | INTEGRATED | bridge auth and op routing covered by a fake bridge; needs a phone and a running bridge |
+| Phone agent tools | `src/connectors/phone-tools.ts` | VERIFIED | `tests/phone.test.ts`: approval flags, tap-by-label, screen read; no phone in the loop |
+| Phone Harness upstream | `vendor/phone-harness` (MIT, 4bebff1) | VENDORED | driven through its CLI/API, not modified |
 | Semantic memory / embeddings | keyword ranking only | NOT ADOPTED | would need an embedding provider |
 
 ## Serverless deployment (Vercel)
