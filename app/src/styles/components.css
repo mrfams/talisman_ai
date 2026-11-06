@@ -232,7 +232,6 @@
   letter-spacing: 0.02em;
   color: var(--muted);
   white-space: nowrap;
-  text-transform: capitalize;
 }
 
 .badge::before {
@@ -836,16 +835,6 @@
   min-height: calc(100dvh - 52px);
 }
 
-@media (max-width: 900px) {
-  .chat {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .chat-side {
-    display: none;
-  }
-}
-
 .chat-side {
   border-right: 1px solid var(--line);
   padding: var(--space-3);
@@ -875,6 +864,28 @@
 .thread-link[aria-current="page"] {
   background: var(--surface-2);
   color: var(--text);
+}
+
+.thread-select {
+  display: none;
+  max-width: 150px;
+  height: 30px;
+  padding: 2px 6px;
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 900px) {
+  .chat {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-side {
+    display: none;
+  }
+
+  .thread-select {
+    display: block;
+  }
 }
 
 .thread {
@@ -971,6 +982,13 @@
 
 .composer-box:focus-within {
   border-color: var(--accent);
+}
+
+@media (max-width: 1023px) {
+  /* The fixed tab bar is 62px; the composer must not sit under it. */
+  .composer {
+    padding-bottom: 76px;
+  }
 }
 
 .composer-input {

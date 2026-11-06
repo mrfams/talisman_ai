@@ -141,6 +141,21 @@ export function Chat() {
 
       <section className="thread">
         <header className="card-head" style={{ borderBottom: "1px solid var(--line)" }}>
+          <select
+            className="select thread-select"
+            aria-label="Switch conversation"
+            value={id ?? ""}
+            onChange={(event) =>
+              navigate(event.target.value ? `/chat/${event.target.value}` : "/chat")
+            }
+          >
+            <option value="">New chat</option>
+            {conversations.data?.map((thread) => (
+              <option key={thread.id} value={thread.id}>
+                {thread.title}
+              </option>
+            ))}
+          </select>
           <div className="grow" style={{ minWidth: 0 }}>
             <div className="small" style={{ fontWeight: 600 }}>
               <span className="truncate" style={{ display: "block" }}>
