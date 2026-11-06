@@ -8,3 +8,6 @@ coverage/
 vendor/**/node_modules/
 vendor/**/dist/
 vendor/**/.env
+
+.vercel
+.env*

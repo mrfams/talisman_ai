@@ -9,6 +9,8 @@ export interface PageContent {
 }
 
 export interface BrowserDriver {
+  /** Identifies the reader in task history: "chromium" or "http". */
+  readonly mode?: string;
   open(url: string, options?: { signal?: AbortSignal }): Promise<PageContent>;
   close(): Promise<void>;
 }

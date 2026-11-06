@@ -10,6 +10,8 @@ export interface PlaywrightDriverOptions {
   /** Use an installed Chrome instead of a bundled Chromium. */
   channel?: string | null;
   executablePath?: string;
+  /** Attach to a remote browser over CDP instead of launching a local one. */
+  wsEndpoint?: string | null;
   timeoutMs?: number;
   userAgent?: string;
 }
@@ -19,6 +21,7 @@ export interface PlaywrightDriverOptions {
  * shared between users; cookies and storage die with the context.
  */
 export class PlaywrightBrowser implements BrowserDriver {
+  readonly mode = "chromium";
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private readonly timeoutMs: number;
@@ -29,12 +32,24 @@ export class PlaywrightBrowser implements BrowserDriver {
 
   private async ensureContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
-    this.browser = await chromium.launch({
-      headless: this.options.headless ?? true,
-      ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
-      ...(this.options.channel ? { channel: this.options.channel } : {}),
-      args: ["--disable-dev-shm-usage", "--disable-background-networking"],
-    });
+    if (this.options.wsEndpoint) {
+      // A remote browser already owns its contexts and lifecycle.
+      this.browser = await chromium.connectOverCDP(this.options.wsEndpoint);
+      const existing = this.browser.contexts()[0];
+      if (existing) {
+        this.context = existing;
+        this.context.setDefaultTimeout(this.timeoutMs);
+        this.context.setDefaultNavigationTimeout(this.timeoutMs);
+        return this.context;
+      }
+    } else {
+      this.browser = await chromium.launch({
+        headless: this.options.headless ?? true,
+        ...(this.options.executablePath ? { executablePath: this.options.executablePath } : {}),
+        ...(this.options.channel ? { channel: this.options.channel } : {}),
+        args: ["--disable-dev-shm-usage", "--disable-background-networking"],
+      });
+    }
     this.context = await this.browser.newContext({
       userAgent:
         this.options.userAgent ??

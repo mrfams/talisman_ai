@@ -24,6 +24,7 @@ import {
   listEvents,
   listMemories,
   listMessages,
+  listOrgIds,
   listSteps,
   listTasks,
   recordAudit,
@@ -32,7 +33,10 @@ import {
 import { planGoal } from "../runtime/planner.js";
 import { isTerminal, type SessionInfo, type Task } from "../core/types.js";
 import { AuthService, bearerToken } from "../auth/service.js";
-import type { ArtifactStore } from "../workspace/workspace.js";
+import type { ArtifactStoreLike } from "../workspace/workspace.js";
+import { applySchema } from "../db/migrate.js";
+import { timingSafeEqual } from "node:crypto";
+import type { TaskEngine } from "../runtime/engine.js";
 import type { ModelRouter } from "../intelligence/router.js";
 import { Agent, type AgentTool } from "../intelligence/agent.js";
 import type { ChatMessage } from "../intelligence/types.js";
@@ -43,7 +47,12 @@ export interface AppDeps {
   database: Database;
   auth: AuthService;
   models: ModelRouter;
-  artifactStore: ArtifactStore;
+  artifactStore: ArtifactStoreLike;
+  /**
+   * Present when this process can execute tasks itself. On a serverless host the
+   * request drives one bounded slice; without it, a separate worker must run.
+   */
+  engine?: TaskEngine;
 }
 
 type Env = { Variables: { session: SessionInfo; token: string } };
@@ -147,6 +156,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
     "/api/health",
     "/api/auth/signup",
     "/api/auth/login",
+    // Machine endpoints: authenticated by CRON_SECRET, not by a user session.
+    "/api/internal/tick",
+    "/api/internal/migrate",
   ]);
 
   app.use("/api/*", async (c, next) => {
@@ -161,8 +173,19 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!bearer && cookie && !["GET", "HEAD"].includes(c.req.method)) {
       const origin = c.req.header("origin");
       if (origin) {
-        const allowed = new URL(deps.config.publicUrl).origin;
-        if (origin !== allowed) throw errors.forbidden("Cross-origin request refused");
+        // Compare with the host that actually served this request: preview
+        // deployments and custom domains never match a fixed PUBLIC_URL.
+        const expectedHost =
+          c.req.header("x-forwarded-host") ?? c.req.header("host") ?? new URL(deps.config.publicUrl).host;
+        let originHost: string | null = null;
+        try {
+          originHost = new URL(origin).host;
+        } catch {
+          originHost = null;
+        }
+        if (!originHost || originHost !== expectedHost) {
+          throw errors.forbidden("Cross-origin request refused");
+        }
       }
     }
     c.set("session", session);
@@ -170,7 +193,41 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return next();
   });
 
-  app.get("/api/health", (c) => c.json({ ok: true, service: "talisman" }));
+  app.get("/api/health", async (c) => {
+    let database = "ok";
+    let schema = "ok";
+    try {
+      await deps.database.query("SELECT 1");
+    } catch {
+      database = "unreachable";
+    }
+    if (database === "ok") {
+      try {
+        const { rows } = await deps.database.query<{ present: string | null }>(
+          "SELECT to_regclass('public.tasks')::text AS present",
+        );
+        schema = rows[0]?.present ? "ok" : "missing";
+      } catch {
+        schema = "unknown";
+      }
+    }
+    return c.json({
+      ok: database === "ok" && schema === "ok",
+      service: "talisman",
+      version: "0.2.0",
+      runtime: deps.config.serverless ? "serverless" : "node",
+      database,
+      schema,
+      capabilities: {
+        models: deps.models.candidates().length > 0,
+        defaultModel: deps.config.defaultModel,
+        search: deps.config.searchUrl ? deps.config.searchProvider : null,
+        browser: deps.config.browserMode,
+        artifacts: deps.config.artifactStore,
+        executor: deps.engine ? "embedded" : "external-worker",
+      },
+    });
+  });
 
   app.post("/api/auth/signup", async (c) => {
     const body = signupBody.parse(await c.req.json());
@@ -446,12 +503,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const detail = await deps.database.withTenant(user.orgId, user.id, async (conn) => {
       const task = await getTask(conn, id);
       if (!task || task.userId !== user.id) return null;
-      const [steps, events, approvals, artifacts] = await Promise.all([
-        listSteps(conn, id),
-        listEvents(conn, id),
-        listApprovals(conn, id),
-        listArtifacts(conn, id),
-      ]);
+      // Sequential on one connection: a pg client runs one query at a time, and
+      // overlapping them is deprecated in pg 8 and removed in pg 9.
+      const steps = await listSteps(conn, id);
+      const events = await listEvents(conn, id);
+      const approvals = await listApprovals(conn, id);
+      const artifacts = await listArtifacts(conn, id);
       return { task, steps, events, approvals, artifacts };
     });
     if (!detail) throw errors.notFound("Task not found");
@@ -530,6 +587,21 @@ export function createApp(deps: AppDeps): Hono<Env> {
     let cursor = c.req.query("after") ?? "0";
     let closed = false;
 
+    // Serverless clients poll a JSON snapshot instead of holding an SSE stream
+    // open for the lifetime of a function invocation.
+    if (c.req.query("format") === "json") {
+      const snapshot = await deps.database.withTenant(user.orgId, user.id, async (conn) => {
+        const events = await listEvents(conn, id, cursor);
+        const current = await getTask(conn, id);
+        return {
+          events,
+          status: current?.status ?? "failed",
+          cursor: events.at(-1)?.seq ?? cursor,
+        };
+      });
+      return c.json(snapshot);
+    }
+
     return streamSSE(c, async (stream) => {
       stream.onAbort(() => {
         closed = true;
@@ -553,6 +625,83 @@ export function createApp(deps: AppDeps): Hono<Env> {
         }
         await new Promise((resolve) => setTimeout(resolve, 750));
       }
+    });
+  });
+
+  /**
+   * Runs one bounded slice of a task in this request. This is how a serverless
+   * deployment executes work: each call is short, progress is committed per step,
+   * and the lease hands the task to the next call when time runs out.
+   */
+  app.post("/api/tasks/:id/run", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const task = await taskForUser(deps, c, id);
+    if (!task) throw errors.notFound("Task not found");
+    if (!deps.engine) {
+      throw errors.unavailable("This deployment has no executor; run the worker process.");
+    }
+    const claimed = await deps.engine.claimById(user.orgId, user.id, id);
+    if (!claimed) {
+      const current = await taskForUser(deps, c, id);
+      return c.json({
+        ran: false,
+        reason: "Task is already running, waiting for approval, or finished.",
+        task: current,
+      });
+    }
+    const { outcome } = await deps.engine.runClaimed(claimed, {
+      budgetMs: deps.config.maxRunMs,
+    });
+    const current = await taskForUser(deps, c, id);
+    return c.json({ ran: true, outcome, task: current });
+  });
+
+  /* ------------------------------------------------- machine endpoints */
+
+  const cronAuthorized = (c: AppContext): boolean => {
+    const expected = deps.config.cronSecret;
+    // Fail closed: with no secret configured the endpoint does not exist.
+    if (!expected) return false;
+    const provided =
+      bearerToken(c.req.header("authorization")) ??
+      c.req.header("x-cron-secret") ??
+      c.req.query("secret");
+    if (!provided) return false;
+    const given = Buffer.from(provided);
+    const wanted = Buffer.from(expected);
+    return given.length === wanted.length && timingSafeEqual(given, wanted);
+  };
+
+  app.all("/api/internal/migrate", async (c) => {
+    if (!cronAuthorized(c)) throw errors.forbidden("Invalid cron secret");
+    await applySchema(deps.database.driver);
+    return c.json({ ok: true, migratedAt: new Date().toISOString() });
+  });
+
+  /** Drains queued tasks within one invocation's time budget. */
+  app.all("/api/internal/tick", async (c) => {
+    if (!cronAuthorized(c)) throw errors.forbidden("Invalid cron secret");
+    if (!deps.engine) throw errors.unavailable("This deployment has no executor");
+    const startedAt = Date.now();
+    const budget = deps.config.maxRunMs;
+    const results: Array<{ taskId: string; outcome: string }> = [];
+    const orgIds = await listOrgIds(deps.database.driver);
+    for (const orgId of orgIds) {
+      if (Date.now() - startedAt >= budget) break;
+      while (Date.now() - startedAt < budget) {
+        const task = await deps.engine.claim(orgId);
+        if (!task) break;
+        const remaining = Math.max(1000, budget - (Date.now() - startedAt));
+        const { outcome } = await deps.engine.runClaimed(task, { budgetMs: remaining });
+        results.push({ taskId: task.id, outcome });
+      }
+    }
+    return c.json({
+      ok: true,
+      ran: results.length,
+      results,
+      durationMs: Date.now() - startedAt,
     });
   });
 

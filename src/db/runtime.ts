@@ -35,7 +35,14 @@ function portInUse(port: number): Promise<boolean> {
  */
 export async function openDatabase(config: Config): Promise<OpenDatabaseResult> {
   if (config.databaseUrl) {
-    const pool = new Pool({ connectionString: config.databaseUrl, max: 10 });
+    const pool = new Pool({
+      connectionString: config.databaseUrl,
+      // Serverless runs many short-lived instances; a large pool per instance
+      // exhausts a managed database's connection limit.
+      max: config.serverless ? 3 : 10,
+      idleTimeoutMillis: config.serverless ? 5_000 : 30_000,
+      application_name: "talisman",
+    });
     const database = Database.fromPool(pool);
     if (config.autoMigrate) await applySchema(database.driver);
     return { database, kind: "postgres" };

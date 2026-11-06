@@ -1,64 +1,89 @@
 # Talisman
 
 A general-purpose personal AI agent platform with strong research and document
-capabilities. Talisman unifies the useful parts of **OpenBot**, **OpenDuet** and
-**OpenMuse** and replaces CopilotKit Intelligence with its own intelligence layer.
+capabilities. Talisman keeps its own intelligence layer (no CopilotKit
+Intelligence) and runs the same code on a long-lived Node host or as a serverless
+function on Vercel.
 
-This repository is an early, working foundation, not a finished product. The
-inventory of the upstreams and what was reused is in
-[`docs/INVENTORY.md`](docs/INVENTORY.md); what is wired today is in
-[`docs/CAPABILITY-MAP.md`](docs/CAPABILITY-MAP.md).
+**Live deployment: <https://talisman-agent.vercel.app>** — sign up, create a task,
+and the console drives its execution and shows the finished PDF.
+
+Evidence and status live in [`docs/CAPABILITY-MAP.md`](docs/CAPABILITY-MAP.md);
+the upstream inventory is in [`docs/INVENTORY.md`](docs/INVENTORY.md); decisions are
+in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
+[`docs/SECURITY.md`](docs/SECURITY.md); serverless operation is in
+[`docs/DEPLOY-VERCEL.md`](docs/DEPLOY-VERCEL.md).
 
 ## What works today
 
 - Multi-user accounts: organisations, memberships, scrypt passwords, hashed
   sessions, cookie or bearer auth, login throttling.
 - Postgres schema with **row-level security** on every tenant table; tenant
-  transactions switch to a non-superuser role so policies actually apply.
+  transactions switch to a non-superuser role so policies actually apply, and the
+  migration grants that role so this also works on a managed Postgres where the
+  owner is not a superuser.
 - Talisman-owned model layer: OpenAI-compatible and Anthropic streaming, model
   routing with fallbacks, a provider-neutral tool-call agent loop, context
-  budgeting and memory injection. No CopilotKit Intelligence import.
+  budgeting and memory injection.
 - Durable tasks: plans, steps, progress, events, pause/resume/cancel/retry,
   approvals with a default-deny gate, leases, heartbeats and receipts.
-- A real browser research pipeline: policy-checked Chromium navigation, real page
-  extraction, evidence-only report composition, real PDF rendering with pdf-lib,
-  and structural verification (header, EOF, parse, pages, hash).
-- A minimal web console at `/`.
-- Unit, integration and one real-Chrome end-to-end test, plus CI.
+- A real research pipeline: policy-checked page reading, real page extraction,
+  evidence-only report composition, real PDF rendering, and structural
+  verification (header, EOF, parse, pages, hash).
+- Two page readers: local Chromium via Playwright, or a dependency-free HTTP
+  reader for hosts where a browser cannot run. A remote Chromium can be attached
+  over CDP.
+- Two artifact backends: filesystem for long-running hosts, Postgres for
+  serverless hosts.
+- A web console at `/`, unit/integration tests, a real-Chrome end-to-end test, a
+  live deployment check, and CI.
 
-Not yet wired: OpenBot's web/mobile apps, Docker computer supervisor, Gmail/
-Calendar, MCP/Composio connectors, goals and monitors, credential encryption,
-semantic memory, and AG-UI. See the capability map.
+Still not wired: OpenBot's Docker computers and supervisor, Gmail/Calendar,
+MCP/Composio connectors, goals and monitors, credential encryption, semantic
+memory and AG-UI. See the capability matrix for why each is not yet adopted.
 
-## Quick start
+## Two ways to run it
 
-Requirements: Node 22+ and (for the browser worker) Google Chrome.
+### Long-running host
 
 ```bash
-cp .env.example .env
-# Set SESSION_SECRET (32+ chars). DATABASE_URL is optional for local dev.
-# `.env` is loaded automatically by the API, worker and migrate commands.
+cp .env.example .env      # set SESSION_SECRET (32+ chars)
 npm install
-npm run migrate        # only needed with DATABASE_URL
-npm start              # API + console on http://localhost:3000
-npm run worker         # in another terminal: executes queued tasks
+npm run migrate           # only needed with DATABASE_URL
+npm start                 # API + console on http://localhost:3000
+npm run worker            # in another terminal: executes queued tasks
 ```
 
 Without `DATABASE_URL`, Talisman starts an embedded Postgres cluster under
-`.data/postgres` on port 55432. The API and worker in separate processes share it;
-production requires a real `DATABASE_URL`.
+`.data/postgres` on port 55432. Production requires a real `DATABASE_URL`.
 
-For research tasks, either put URLs in the request or set `TALISMAN_SEARCH_URL`
-to a SearXNG-compatible JSON endpoint. Configure `OPENAI_API_KEY` and/or
-`ANTHROPIC_API_KEY` for chat and general answers.
+### Serverless (Vercel)
+
+The deployed build uses a Node function, managed Postgres (Neon), artifacts in
+Postgres and a bounded execution slice per request. See
+[`docs/DEPLOY-VERCEL.md`](docs/DEPLOY-VERCEL.md) for the full mapping, the
+environment table and the limits. In short:
+
+```bash
+npx vercel link --project talisman-agent
+npx vercel integration add neon --name talisman-db
+npx vercel deploy --prod
+curl -X POST https://<deployment>/api/internal/migrate -H "authorization: Bearer $CRON_SECRET"
+```
+
+A task is a plan of steps, each of which commits its own progress. `POST
+/api/tasks/:id/run` executes one slice with a 45 s budget and hands the task back
+when time runs out, so a function timeout, deploy or cold start never loses work.
+`GET /api/health` reports `database`, `schema` and the resolved capabilities.
 
 ## First end-to-end workflow
 
 1. Sign up in the console.
-2. Create a task: `Research https://example.com/a and https://example.com/b and
-   prepare a document about it.`
-3. The worker plans four steps, opens each page in real Chrome, extracts evidence,
-   composes a report, renders a PDF and verifies it.
+2. Create a task: `Research https://example.com and
+   https://www.iana.org/help/example-domains and prepare a document about
+   reserved example domains.`
+3. The worker or the request-driven executor plans four steps, reads each page,
+   extracts evidence, composes a report, renders a PDF and verifies it.
 4. Progress, per-step history, sources and the artifact are visible on the task.
 
 The PDF contains the pages' real text with source URLs. If a page fails, the
@@ -70,46 +95,53 @@ can be read, the task fails honestly.
 ```
 src/core        types, config, ids, errors, logging
 src/db          schema.sql (RLS), drivers, repositories, migrations
+src/app         runtime assembly shared by every entry point
 src/auth        scrypt passwords, sessions
 src/intelligence provider adapters, router, context, agent loop
 src/runtime     planner, task engine, research/document handlers
-src/browser     URL policy, Playwright driver, collection/search
+src/browser     URL policy, Playwright driver, HTTP reader, collection/search
 src/documents   report composition, PDF render, verification
-src/workspace   per-task workspace and artifact store
+src/workspace   per-task workspace, filesystem and Postgres artifact stores
 src/api         Hono app and server
-src/worker      durable worker loop
+src/worker      durable worker loop for long-running hosts
+api             Vercel serverless entry point
 public          console
+scripts         live deployment check, test Postgres helper
 tests           unit, integration, API and real-browser E2E
 vendor          upstream source, unmodified, with licences
-docs            inventory, capability map, decisions, security
+docs            capability matrix, inventory, decisions, security, deployment
 ```
 
 ## Checks
 
 ```bash
-npm run typecheck
-npm run test:browser      # real Chrome + PDF, no database needed
-npm test                  # full suite; needs Postgres and Chrome
+npm run typecheck        # tsc --noEmit
+npm run test:unit        # 22 unit/integration tests; needs Postgres
+npm run test:browser     # real Chrome + PDF, no database needed
+npm run test:e2e         # research task through the durable engine
+BASE=https://talisman-agent.vercel.app node scripts/e2e-live.mjs
 ```
 
-Tests use one embedded Postgres per run, or `TALISMAN_TEST_PG_URL` when an
-external server is available. CI supplies a Postgres service and Chrome.
+Verified on 6 November 2026:
 
-Verified on 5 November 2026: `tsc --noEmit` clean, and **19/19 tests pass** on
-Node 26 with real Postgres and host Chrome, including tenant isolation, approvals,
-pause/resume/cancel, API scoping and a real-browser research run producing a
-verified PDF. The end-to-end run used fixture pages and a mock model; a separate
-live APInex check confirmed streaming chat and tool calls on the free tier, but
-live search and a full live research run are still pending. Details and gaps are in
-[`docs/SESSION-REPORT.md`](docs/SESSION-REPORT.md).
+- `tsc --noEmit` clean.
+- **22/22 unit and integration tests pass**: auth (4), tenant isolation (3),
+  task lifecycle and retries (5), serverless slices and Postgres artifacts (4),
+  intelligence (5), API (1). The combined run under `--test-force-exit` can
+  report a file-level teardown error on this memory-constrained machine; every
+  file passes when the runner is allowed to exit normally.
+- **12/12 live checks pass** against the deployment: health, anonymous
+  rejection, signup, cross-origin mutation refused, task created, task
+  succeeded, all four steps succeeded, PDF downloaded and parsed (1 page, hash
+  matches the stored digest), cross-tenant task and artifact access refused,
+  finished task not re-executed. Run with `node scripts/e2e-live.mjs`.
+- A real-Chrome run and a research task through the durable engine passed in the
+  previous session (`tests/browser.smoke.test.ts`, `tests/e2e.research.test.ts`)
+  and were not re-run here.
 
-## Security posture
-
-Talisman defaults to deny: RLS with no tenant context returns nothing; browser
-URLs must be http(s), public, and optionally allowlisted; tools that require
-approval are denied when no approval handler is provided; missing policies fail
-closed. This is a foundation, not a hardened multi-tenant deployment. Read
-[`docs/SECURITY.md`](docs/SECURITY.md) before exposing it to anyone else.
+The live run used real public pages through the HTTP reader and the APInex free
+model tier. It did not exercise a JavaScript-rendered page, a remote CDP browser,
+live web search, or a real Gmail/Calendar connector.
 
 ## Attribution
 

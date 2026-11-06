@@ -5,6 +5,7 @@ import type { Conn, Database } from "../db/database.js";
 import {
   appendEvent,
   claimNextTask,
+  claimTaskById,
   createApproval,
   createArtifact,
   createMemory,
@@ -25,7 +26,7 @@ import type {
 } from "../core/types.js";
 import type { ModelRouter } from "../intelligence/router.js";
 import type { BrowserDriver } from "../browser/driver.js";
-import type { ArtifactStore } from "../workspace/workspace.js";
+import type { ArtifactStoreLike } from "../workspace/workspace.js";
 import { Workspace } from "../workspace/workspace.js";
 
 export class ApprovalPending extends Error {
@@ -45,7 +46,9 @@ export interface StepContext {
   models: ModelRouter;
   workspace: Workspace;
   browser: BrowserDriver | null;
+  searchProvider: "searxng" | "apinex";
   searchUrl: string | null;
+  searchApiKey: string | null;
   report(
     kind: TaskEventKind,
     title: string,
@@ -76,10 +79,11 @@ export interface EngineDeps {
   config: Config;
   models: ModelRouter;
   handlers: Record<string, StepHandler>;
-  artifactStore: ArtifactStore;
+  artifactStore: ArtifactStoreLike;
   workerId: string;
   leaseMs?: number;
-  browserFactory?: () => BrowserDriver;
+  /** Returns null when this deployment has no page reader at all. */
+  browserFactory?: () => BrowserDriver | null;
 }
 
 const WATCH_INTERVAL_MS = 750;
@@ -115,9 +119,32 @@ export class TaskEngine {
     );
   }
 
-  async runClaimed(task: Task): Promise<void> {
+  /**
+   * Claims one specific task for the caller. Used by the HTTP executor on
+   * serverless hosts, where a request runs one bounded slice of a task instead of
+   * a process living for the whole job. Returns null when the task is finished,
+   * waiting for a human, or already leased by another executor.
+   */
+  async claimById(orgId: string, userId: string, taskId: string): Promise<Task | null> {
+    return this.deps.database.withTenant(orgId, userId, (conn) =>
+      claimTaskById(conn, taskId, this.deps.workerId, this.leaseMs),
+    );
+  }
+
+  async runClaimed(
+    task: Task,
+    options: { budgetMs?: number } = {},
+  ): Promise<{ outcome: "completed" | "timed_out" }> {
     const controller = new AbortController();
     const browser = this.deps.browserFactory?.() ?? null;
+    let timedOut = false;
+    const deadline = options.budgetMs
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, options.budgetMs)
+      : null;
+    deadline?.unref?.();
     const heartbeat = setInterval(() => {
       void this.heartbeat(task).catch(() => undefined);
     }, HEARTBEAT_MS);
@@ -126,11 +153,50 @@ export class TaskEngine {
     }, WATCH_INTERVAL_MS);
     try {
       await this.execute(task, controller.signal, browser);
+      return { outcome: timedOut ? "timed_out" : "completed" };
     } finally {
+      if (deadline) clearTimeout(deadline);
       clearInterval(heartbeat);
       clearInterval(watcher);
       await browser?.close().catch(() => undefined);
+      // A slice that ran out of time must hand the task back, not leave a lease
+      // that blocks the next tick until it expires.
+      if (timedOut) await this.abandon(task).catch(() => undefined);
     }
+  }
+
+  /**
+   * Releases a still-running task back to the queue so another slice resumes it.
+   * Only the current lease holder may do this.
+   */
+  private async abandon(task: Task): Promise<void> {
+    const fresh = await this.load(task);
+    if (!fresh || fresh.leaseOwner !== this.deps.workerId) return;
+    if (["waiting_approval", "paused", "cancelled", "succeeded", "failed"].includes(fresh.status)) {
+      await this.withTenant(task, (conn) =>
+        updateTask(conn, task.id, { leaseOwner: null, leaseUntil: null }),
+      );
+      return;
+    }
+    await this.withTenant(task, async (conn) => {
+      await conn.query(
+        `UPDATE task_steps SET status = 'pending', error = NULL, started_at = NULL, finished_at = NULL
+          WHERE task_id = $1 AND status = 'running'`,
+        [task.id],
+      );
+      await updateTask(conn, task.id, {
+        status: "queued",
+        leaseOwner: null,
+        leaseUntil: null,
+      });
+      await appendEvent(conn, {
+        orgId: task.orgId,
+        taskId: task.id,
+        kind: "status",
+        title: "Paused at the time limit",
+        detail: "The unfinished step will resume on the next execution slice.",
+      });
+    });
   }
 
   private async watch(task: Task, controller: AbortController): Promise<void> {
@@ -394,6 +460,8 @@ export class TaskEngine {
       task.orgId,
       task.userId,
       task.id,
+      // Artifacts in Postgres means the host has no durable disk to write to.
+      this.deps.config.artifactStore === "fs",
     );
 
     return {
@@ -405,7 +473,9 @@ export class TaskEngine {
       models: this.deps.models,
       workspace,
       browser,
+      searchProvider: this.deps.config.searchProvider,
       searchUrl: this.deps.config.searchUrl,
+      searchApiKey: this.deps.config.searchApiKey,
       report: async (kind, title, detail, data) => {
         await tenant((conn) =>
           appendEvent(conn, {

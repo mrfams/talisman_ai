@@ -7,6 +7,7 @@ import { TaskEngine } from "../runtime/engine.js";
 import { defaultHandlers } from "../runtime/handlers.js";
 import { ArtifactStore } from "../workspace/workspace.js";
 import { PlaywrightBrowser } from "../browser/playwright.js";
+import { createBrowser } from "../browser/factory.js";
 import { loadLocalEnv } from "../core/env.js";
 
 loadLocalEnv();
@@ -21,14 +22,7 @@ const engine = new TaskEngine({
   handlers: defaultHandlers,
   artifactStore: new ArtifactStore(config.dataDir),
   workerId: config.workerId,
-  browserFactory: () =>
-    new PlaywrightBrowser({
-      policy: {
-        allowedHosts: config.browserAllowedHosts,
-        allowPrivateNetwork: config.browserAllowPrivate,
-      },
-      channel: process.env.TALISMAN_BROWSER_CHANNEL ?? "chrome",
-    }),
+  browserFactory: () => createBrowser(config),
 });
 
 let running = true;
@@ -61,6 +55,7 @@ log.info("Talisman worker started", {
   worker: config.workerId,
   concurrency: config.workerConcurrency,
   database: kind,
+  browser: config.browserMode,
 });
 
 while (running) {

@@ -150,6 +150,20 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts (task_id);
 CREATE INDEX IF NOT EXISTS artifacts_org_idx ON artifacts (org_id, created_at DESC);
 
+-- Artifact bytes for hosts without a persistent disk (serverless). Kept apart
+-- from `artifacts` so listing artifacts never reads large values.
+-- No foreign key to `artifacts`: bytes are written first, then the row that
+-- describes them, inside the same task step. Deletion of a task cascades through
+-- `artifacts`; blobs are removed by the retention job (and are org-scoped here).
+CREATE TABLE IF NOT EXISTS artifact_blobs (
+  artifact_id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  bytes bytea NOT NULL,
+  sha256 text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS artifact_blobs_org_idx ON artifact_blobs (org_id);
+
 CREATE TABLE IF NOT EXISTS memories (
   id text PRIMARY KEY,
   org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -193,7 +207,8 @@ DECLARE
 BEGIN
   FOREACH t IN ARRAY ARRAY[
     'conversations','messages','tasks','task_steps','task_events',
-    'approvals','artifacts','memories','audit_events','provider_credentials'
+    'approvals','artifacts','artifact_blobs','memories','audit_events',
+    'provider_credentials'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
@@ -214,6 +229,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'talisman_app') THEN
     CREATE ROLE talisman_app NOLOGIN;
   END IF;
+  -- The connecting role must be allowed to switch into it. On a superuser this is
+  -- implicit; on a managed Postgres (Neon, RDS) the owner is not a superuser, so
+  -- without this grant every tenant transaction would fail closed.
+  EXECUTE format('GRANT talisman_app TO %I', current_user);
+EXCEPTION
+  WHEN insufficient_privilege THEN NULL;
+  WHEN duplicate_object THEN NULL;
 END $$;
 
 GRANT USAGE ON SCHEMA public TO talisman_app;

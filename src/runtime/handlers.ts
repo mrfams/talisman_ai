@@ -1,4 +1,10 @@
-import { collectSources, extractUrls, searchWeb, type ResearchSource } from "../browser/research.js";
+import {
+  collectSources,
+  extractUrls,
+  searchQuery,
+  searchWeb,
+  type ResearchSource,
+} from "../browser/research.js";
 import { buildResearchReport, renderReportMarkdown, type Report } from "../documents/report.js";
 import { renderReportPdf, verifyPdf } from "../documents/pdf.js";
 import { slugify } from "../core/ids.js";
@@ -49,7 +55,9 @@ export const researchCollect: StepHandler = async (context) => {
       );
     }
     await context.report("log", "Searching the web", "Using the configured search provider");
-    const results = await searchWeb(context.task.goal, context.searchUrl, {
+    const results = await searchWeb(searchQuery(context.task.goal), context.searchUrl, {
+      provider: context.searchProvider,
+      apiKey: context.searchApiKey,
       signal: context.signal,
       limit: 5,
     });
@@ -58,7 +66,11 @@ export const researchCollect: StepHandler = async (context) => {
   }
 
   if (!context.browser) throw new Error("No browser is available to this worker");
-  await context.report("log", `Opening ${urls.length} source(s) in Chromium`, urls.join(", "));
+  await context.report(
+    "log",
+    `Opening ${urls.length} source(s) with the ${context.browser.mode ?? "chromium"} reader`,
+    urls.join(", "),
+  );
 
   const collected = await collectSources(urls, context.browser, {
     signal: context.signal,
@@ -91,7 +103,15 @@ export const researchSynthesize: StepHandler = async (context) => {
     sources,
     failures,
   });
-  await context.workspace.write("report.md", renderReportMarkdown(report));
+  if (context.workspace.writable) {
+    await context.workspace.write("report.md", renderReportMarkdown(report));
+  } else {
+    await context.report(
+      "log",
+      "Workspace files are not persisted on this host",
+      "The report is stored as a downloadable artifact instead.",
+    );
+  }
   await context.remember(
     "research",
     `${report.title}: compiled from ${report.sources.length} source(s) on ${report.generatedAt}.`,
@@ -115,7 +135,7 @@ export const documentRender: StepHandler = async (context) => {
     bytes,
     metadata: { pageCount, sections: report.sections.length, sources: report.sources.length },
   });
-  await context.workspace.write(name, bytes);
+  if (context.workspace.writable) await context.workspace.write(name, bytes);
   await context.report("artifact", "Document ready", name, {
     artifactId: artifact.id,
     pageCount,

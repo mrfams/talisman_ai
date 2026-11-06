@@ -1,3 +1,70 @@
+# Session report — 5–6 November 2026
+
+## Milestone 2 — production deployment (6 November 2026)
+
+Objective: make the working implementation deployable and testable by a real
+user on Vercel, without weakening the isolation that already worked.
+
+### What was integrated
+
+| Area | Change | Evidence |
+| --- | --- | --- |
+| Serverless entry | `api/index.ts` (Hono via `getRequestListener`), `vercel.json` rewrites, `maxDuration` 60, schema bundled | live `/api/health` 200 |
+| Managed Postgres | Neon resource; migration grant so `SET ROLE talisman_app` works where the owner is not a superuser | live `database:ok`, `schema:ok` |
+| Artifact backend | `PgArtifactStore` + `artifact_blobs` under RLS; filesystem store kept for long-running hosts | `tests/serverless.test.ts`, live PDF download |
+| Execution model | `claimTaskById`, bounded slices (`budgetMs`), lease release on timeout, `POST /api/tasks/:id/run` | `tests/serverless.test.ts`, live E2E |
+| Machine endpoints | `/api/internal/tick` and `/api/internal/migrate`, timing-safe `CRON_SECRET`, disabled when unset | live migrate, then E2E |
+| Page reader | `HttpBrowser` (no JS engine) plus CDP attach for `PlaywrightBrowser` | `tests/serverless.test.ts`, live E2E |
+| Workspace | explicit non-persistent mode instead of a failing `mkdir /var/task/.data` | live E2E (first run failed here, then passed) |
+| Origin guard | compares `Origin` to the serving host instead of a fixed `PUBLIC_URL` | live 403 for a foreign origin |
+| Console | capability banner, JSON event polling, drives execution slices | live use |
+| Concurrency fix | task detail reads are sequential on one connection (pg 9 removes overlapping queries) | `tests/api.test.ts` |
+
+### What works
+
+A new user can sign up on the deployment, create a research task with real URLs,
+watch it execute, and download a verified PDF. Tasks survive function timeouts
+and cold starts because each step commits progress and the lease is released.
+Tenant isolation is enforced by RLS and by per-user predicates; both were
+exercised live against a second account.
+
+### Tests actually run
+
+```
+npx tsc --noEmit                                     exit 0
+npx tsx --test --test-concurrency=1 <6 unit files>   22/22 pass
+node scripts/e2e-live.mjs                            12/12 pass (live)
+```
+
+The first live run failed at `research.synthesize` with
+`ENOENT: mkdir '/var/task/.data'`; that was a real defect in the serverless path
+and is fixed by the explicit non-persistent workspace. The second live run
+reported a false failure in the PDF check because the script scanned raw bytes
+for page markers while pdf-lib compresses object streams; the check now parses
+the document and compares the served hash.
+
+### Still disconnected or unverified
+
+- A JavaScript-rendered page and a remote CDP browser were not exercised.
+- Live web search was not exercised (seed URLs were supplied instead).
+- The daily cron drain is configured but has not been observed firing; execution
+  is driven by requests.
+- Credential encryption, Gmail/Calendar, MCP/Composio and Docker computers remain
+  unimplemented or vendored (`docs/CAPABILITY-MAP.md`).
+- There are no per-tenant quotas: an account can spend the provider balance.
+
+### Next tasks
+
+1. Implement the AES-GCM credential helper so provider/integration credentials
+   can be stored per tenant, which unblocks Gmail and Calendar.
+2. Point `BROWSER_WS_ENDPOINT` at a real remote Chromium and re-run the research
+   task against a JS-rendered page.
+3. Add per-tenant token and task quotas, and make the login throttle shared.
+4. Wire one upstream connector end to end (start with Google Calendar) and mark
+   it VERIFIED only after a real call returns real data.
+
+---
+
 # Session report — 5 November 2026
 
 ## Objective

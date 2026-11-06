@@ -412,6 +412,33 @@ export async function claimNextTask(
   return updated[0] ? mapTask(updated[0]) : null;
 }
 
+/**
+ * Claims one named task under the same lease rules as `claimNextTask`. A claim
+ * only counts as a retry when the previous slice recorded a failure, so running a
+ * multi-step task as several short slices does not exhaust its retry budget.
+ */
+export async function claimTaskById(
+  conn: Conn,
+  taskId: string,
+  workerId: string,
+  leaseMs: number,
+): Promise<Task | null> {
+  const { rows } = await conn.query<Row>(
+    `UPDATE tasks
+        SET status = 'running', lease_owner = $2,
+            lease_until = now() + ($3::text || ' milliseconds')::interval,
+            attempts = attempts + CASE WHEN error IS NULL THEN 0 ELSE 1 END,
+            started_at = COALESCE(started_at, now()), updated_at = now()
+      WHERE id = $1
+        AND (status = 'queued'
+             OR (status = 'scheduled' AND (run_after IS NULL OR run_after <= now()))
+             OR (status = 'running' AND (lease_until IS NULL OR lease_until <= now())))
+      RETURNING *`,
+    [taskId, workerId, String(leaseMs)],
+  );
+  return rows[0] ? mapTask(rows[0]) : null;
+}
+
 export async function createStep(
   conn: Conn,
   input: {

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Driver } from "./database.js";
 
@@ -71,8 +72,21 @@ export function splitSqlStatements(sql: string): string[] {
 }
 
 export async function applySchema(driver: Driver): Promise<void> {
-  const sql = await readFile(fileURLToPath(schemaUrl), "utf8");
-  await applySchemaSql(driver, sql);
+  // Bundlers (Vercel, esbuild) resolve the schema differently from tsx. Try the
+  // module-relative path first, then the project layout, and fail loudly if
+  // neither exists rather than reporting a healthy but empty database.
+  const candidates = [fileURLToPath(schemaUrl), resolve(process.cwd(), "src/db/schema.sql")];
+  for (const candidate of candidates) {
+    try {
+      const sql = await readFile(candidate, "utf8");
+      await applySchemaSql(driver, sql);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw error;
+    }
+  }
+  throw new Error("Could not locate schema.sql in this deployment");
 }
 
 export async function applySchemaSql(driver: Driver, sql: string): Promise<void> {

@@ -1,0 +1,8 @@
+vendor
+.data
+docs
+tests
+scripts
+.env
+.env.*
+*.log

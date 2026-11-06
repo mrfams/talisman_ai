@@ -1,6 +1,6 @@
 {
   "name": "talisman",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "migrate": "tsx src/db/migrate-cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
-    "test:unit": "tsx --test --test-concurrency=1 tests/intelligence.test.ts tests/auth.test.ts tests/runtime.test.ts tests/db.test.ts tests/api.test.ts",
+    "test:unit": "tsx --test --test-concurrency=1 tests/intelligence.test.ts tests/auth.test.ts tests/runtime.test.ts tests/serverless.test.ts tests/db.test.ts tests/api.test.ts",
     "test:browser": "tsx --test --test-concurrency=1 tests/browser.smoke.test.ts",
     "test:e2e": "tsx --test --test-concurrency=1 tests/e2e.research.test.ts"
   },

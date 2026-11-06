@@ -8,7 +8,7 @@
   :root { color-scheme: dark; --bg:#0e1014; --panel:#171a21; --line:#262b35; --text:#e6e8ee; --muted:#98a0b3; --accent:#8b7bff; --ok:#4fd1a1; --warn:#ffb454; --bad:#ff6b6b; }
   * { box-sizing: border-box; }
   body { margin:0; font:15px/1.5 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--text); }
-  header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; border-bottom:1px solid var(--line); }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:16px 24px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
   h1 { font-size:18px; margin:0; letter-spacing:.02em; }
   main { max-width:1100px; margin:0 auto; padding:24px; display:grid; gap:20px; grid-template-columns: 1fr 1fr; }
   @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
@@ -36,11 +36,13 @@
   #events { font:12px/1.6 ui-monospace, monospace; max-height:360px; overflow:auto; background:#0f1218; border-radius:8px; padding:10px; white-space:pre-wrap; }
   .hidden { display:none !important; }
   a { color:var(--accent); }
+  #caps { display:flex; gap:6px; flex-wrap:wrap; }
 </style>
 </head>
 <body>
 <header>
   <h1>Talisman</h1>
+  <div id="caps" class="muted"></div>
   <div class="row">
     <span id="who" class="muted"></span>
     <button id="logout" class="hidden">Sign out</button>
@@ -87,7 +89,9 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let currentTask = null;
-let stream = null;
+let cursor = "0";
+let polling = null;
+let running = false;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -105,7 +109,26 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+async function showCapabilities() {
+  try {
+    const health = await api("/api/health");
+    const caps = health.capabilities || {};
+    const parts = [
+      health.runtime,
+      `db:${health.database}`,
+      `schema:${health.schema}`,
+      `models:${caps.models ? caps.defaultModel : "none"}`,
+      `browser:${caps.browser}`,
+      `artifacts:${caps.artifacts}`,
+    ];
+    $("caps").innerHTML = parts.map((part) => `<span class="pill">${escapeHtml(part)}</span>`).join("");
+  } catch {
+    $("caps").innerHTML = "";
+  }
+}
+
 async function boot() {
+  showCapabilities();
   try {
     const { user } = await api("/api/me");
     signedIn(user);
@@ -180,26 +203,43 @@ async function loadTasks() {
   }
 }
 
-async function openTask(id) {
+function openTask(id) {
   currentTask = id;
-  if (stream) { stream.close(); stream = null; }
+  cursor = "0";
   $("detail").classList.remove("hidden");
   $("events").textContent = "";
-  await refreshTask();
-  stream = new EventSource(`/api/tasks/${id}/events`);
-  stream.addEventListener("task", async (event) => {
-    const data = JSON.parse(event.data);
-    $("events").textContent += `[${data.kind}] ${data.title}${data.detail ? " — " + data.detail : ""}\n`;
-    $("events").scrollTop = $("events").scrollHeight;
-    if (["status", "step", "approval", "artifact", "done", "error"].includes(data.kind)) {
-      await refreshTask();
+  if (polling) clearInterval(polling);
+  refreshTask();
+  polling = setInterval(pollTask, 1200);
+}
+
+async function pollTask() {
+  if (!currentTask) return;
+  try {
+    const { events, cursor: next } = await api(`/api/tasks/${currentTask}/events?format=json&after=${cursor}`);
+    cursor = next;
+    for (const data of events) {
+      $("events").textContent += `[${data.kind}] ${data.title}${data.detail ? " — " + data.detail : ""}\n`;
+      $("events").scrollTop = $("events").scrollHeight;
     }
-  });
-  stream.addEventListener("end", () => { if (stream) { stream.close(); stream = null; } loadTasks(); });
+    const detail = await refreshTask();
+    if (!detail) return;
+    const status = detail.task.status;
+    // Advance the task from this page when the deployment has no always-on worker.
+    if (["queued", "scheduled", "running"].includes(status) && !running) {
+      running = true;
+      api(`/api/tasks/${currentTask}/run`, { method: "POST" })
+        .catch(() => undefined)
+        .finally(() => { running = false; });
+    }
+    if (["succeeded", "failed", "cancelled"].includes(status)) loadTasks();
+  } catch (error) {
+    $("events").textContent += `[client] ${error.message}\n`;
+  }
 }
 
 async function refreshTask() {
-  if (!currentTask) return;
+  if (!currentTask) return null;
   const detail = await api(`/api/tasks/${currentTask}`);
   const task = detail.task;
   $("task-title").textContent = task.title;
@@ -258,10 +298,10 @@ async function refreshTask() {
     wrapper.appendChild(link);
     $("artifacts").appendChild(wrapper);
   }
+  return detail;
 }
 
 boot();
-setInterval(() => { if ($("app").classList.contains("hidden") === false && !currentTask) loadTasks(); }, 5000);
 </script>
 </body>
 </html>
