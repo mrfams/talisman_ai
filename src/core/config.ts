@@ -36,6 +36,9 @@ const envSchema = z.object({
   TALISMAN_ARTIFACT_STORE: z.enum(["auto", "fs", "postgres"]).default("auto"),
   /** Shared secret for scheduled queue drains. Unset disables the endpoints. */
   CRON_SECRET: z.string().optional(),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REDIRECT_URI: z.string().optional(),
   /** Wall-clock budget for one execution slice, in milliseconds. */
   TALISMAN_MAX_RUN_MS: z.coerce.number().int().positive().max(120_000).default(45_000),
   WORKER_ID: z.string().default("worker-1"),
@@ -73,6 +76,9 @@ export interface Config {
   browserChannel: string;
   artifactStore: ArtifactBackend;
   cronSecret: string | null;
+  googleClientId: string | null;
+  googleClientSecret: string | null;
+  googleRedirectUri: string | null;
   maxRunMs: number;
   workerId: string;
   workerConcurrency: number;
@@ -140,6 +146,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     browserChannel: parsed.TALISMAN_BROWSER_CHANNEL,
     artifactStore,
     cronSecret: parsed.CRON_SECRET ?? null,
+    googleClientId: parsed.GOOGLE_CLIENT_ID ?? null,
+    googleClientSecret: parsed.GOOGLE_CLIENT_SECRET ?? null,
+    googleRedirectUri: parsed.GOOGLE_REDIRECT_URI ?? null,
     maxRunMs: parsed.TALISMAN_MAX_RUN_MS,
     workerId: parsed.WORKER_ID,
     workerConcurrency: parsed.WORKER_CONCURRENCY,

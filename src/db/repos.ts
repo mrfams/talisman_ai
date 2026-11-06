@@ -854,6 +854,34 @@ export async function getCredential(
     : null;
 }
 
+export async function hasCredential(
+  conn: Conn,
+  orgId: string,
+  provider: string,
+  label: string,
+): Promise<boolean> {
+  const { rows } = await conn.query(
+    "SELECT 1 FROM provider_credentials WHERE org_id = $1 AND provider = $2 AND label = $3",
+    [orgId, provider, label],
+  );
+  return rows.length > 0;
+}
+
+export async function deleteCredential(
+  conn: Conn,
+  orgId: string,
+  provider: string,
+  label: string,
+): Promise<boolean> {
+  const { rows } = await conn.query(
+    `DELETE FROM provider_credentials
+      WHERE org_id = $1 AND provider = $2 AND label = $3
+      RETURNING id`,
+    [orgId, provider, label],
+  );
+  return rows.length > 0;
+}
+
 /* --------------------------------------------------------------- planning */
 
 export function planSteps(plan: TaskPlan): PlanStep[] {

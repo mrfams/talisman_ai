@@ -151,6 +151,23 @@ const run = async () => {
 
   const pauseBefore = await call(`/api/tasks/${taskId}/run`, { method: "POST", cookie: alice.cookie });
   record("finished task is not re-executed", pauseBefore.json?.ran === false, JSON.stringify(pauseBefore.json?.reason ?? ""));
+
+  const connectors = await call("/api/connectors", { cookie: alice.cookie });
+  const google = connectors.json?.connectors?.find((entry) => entry.id === "google");
+  record(
+    "credential encryption is enabled",
+    connectors.json?.encryption === true,
+    `google configured: ${google?.configured ?? false}`,
+  );
+  const unconnected = await call("/api/connectors/google/verify", {
+    method: "POST",
+    cookie: alice.cookie,
+  });
+  record(
+    "unconnected connector refuses to execute",
+    unconnected.status === 409 || unconnected.status === 503,
+    `HTTP ${unconnected.status}`,
+  );
 };
 
 try {

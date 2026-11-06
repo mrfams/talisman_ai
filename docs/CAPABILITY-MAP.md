@@ -38,7 +38,10 @@ the strength of a README or of source being present.
 | Bounded execution slices (serverless) | `TaskEngine.runClaimed({budgetMs})`, `claimTaskById` | VERIFIED | `tests/serverless.test.ts`, live E2E |
 | Machine endpoints (`tick`, `migrate`) behind `CRON_SECRET` | `src/api/app.ts` | VERIFIED | live `/api/internal/migrate`, health |
 | Audit logging | `audit_events` | INTEGRATED | written on auth/task/approval; no read API |
-| Credential encryption at rest | `provider_credentials` table + `CREDENTIAL_ENCRYPTION_KEY` | BLOCKED | no AES-GCM helper implemented; do not store keys |
+| Credential encryption at rest | `src/security/secrets.ts`, `src/connectors/store.ts` | VERIFIED | `tests/connectors.test.ts`: round trip, AAD binding, tampering, wrong key |
+| Connector OAuth state | `src/connectors/oauth-state.ts` | VERIFIED | forged state returns 403; expiry and redirect URI pinned |
+| Google Calendar: list events | `src/connectors/google.ts`, `calendar_list_events` | INTEGRATED | `tests/connectors.test.ts` against a fake Google backend; **not** verified against real Google |
+| Google Calendar: create event | `calendar_create_event`, approval required | INTEGRATED | same test; approval gate covered by `tests/intelligence.test.ts` |
 | Semantic memory / embeddings | keyword ranking only | NOT ADOPTED | would need an embedding provider |
 
 ## Serverless deployment (Vercel)
@@ -62,7 +65,8 @@ the strength of a README or of source being present.
 | OpenBot MCP infrastructure | `vendor/openbot/server/src/mcp*` | VENDORED | Adapter not written |
 | OpenBot Composio connectors | `vendor/openbot/server/src/plugins` | VENDORED | Adapter not written |
 | OpenMuse task engine, goals, monitors | `vendor/openmuse/apps/server/src/engine` | INSPECTED | Talisman's task engine is its own; goals/monitors not ported |
-| OpenMuse Gmail / Calendar adapters | `vendor/openmuse/packages/integrations` | VENDORED | Needs OAuth credentials and per-tenant token storage |
+| OpenMuse Gmail adapter | `vendor/openmuse/packages/integrations/src/google.ts` | VENDORED | Still needs an adapter; OAuth plumbing now exists for Calendar |
+| OpenMuse Calendar shapes | same file | INTEGRATED | Endpoints and calendar-id validation reused in `src/connectors/google.ts`, with Talisman-owned OAuth, refresh and encryption |
 | OpenMuse memory subsystem | `vendor/openmuse` | INSPECTED | Talisman uses a keyword-ranked `memories` table |
 | OpenDuet web application | `vendor/openduet` | NOT ADOPTED | It is a Next.js app with its own data model; adopting it would duplicate the working console and the RLS schema |
 | OpenDuet mobile application | `vendor/openduet` | NOT ADOPTED | Not deployable from this repository without a separate mobile pipeline |

@@ -11,6 +11,11 @@ hardened multi-tenant service yet.
 | Passwords | scrypt (N=16384, r=8, p=1), per-password salt, timing-safe compare | `tests/auth.test.ts` |
 | Sessions | 256-bit random tokens; only a peppered SHA-256 hash stored; 7-day expiry; revocable | `tests/auth.test.ts` |
 | Cookies | httpOnly, SameSite=Lax, Secure in production | API |
+| Credential encryption | AES-256-GCM, 96-bit IV per record, AAD binding org + provider + user | `tests/connectors.test.ts` |
+| Connector tokens | encrypted at rest, never returned to a client, per user within an org | `tests/connectors.test.ts` |
+| OAuth state | HMAC-SHA256 over tenant, user, pinned redirect URI and a 10-minute expiry | `tests/connectors.test.ts` (forged state 403) |
+| Connector writes | `calendar_create_event` requires an explicit approval | `tests/connectors.test.ts`, `tests/intelligence.test.ts` |
+| Connector fail-closed | no key or no OAuth client refuses the request instead of degrading to plaintext | `tests/connectors.test.ts` |
 | Cookie CSRF | a mutation whose `Origin` is present must match the host that served the request | `scripts/e2e-live.mjs` (403 on foreign origin) |
 | Login throttling | per-email counter, 10 attempts / 15 minutes | code (in-process) |
 | Tenant isolation | `org_id` everywhere, RLS enabled **and forced**, non-superuser role, `SET LOCAL` context | `tests/db.test.ts` |
@@ -30,8 +35,9 @@ hardened multi-tenant service yet.
 
 ## Gaps (do not treat as production-ready for untrusted users)
 
-1. **Credential encryption is not implemented.** `CREDENTIAL_ENCRYPTION_KEY` is
-   read but nothing uses it yet; `provider_credentials` must stay empty.
+1. **Only Google Calendar is wired.** Gmail, Composio and MCP connectors are
+   still absent. Rotating `CREDENTIAL_ENCRYPTION_KEY` invalidates every stored
+   token: users must reconnect, and there is no re-encryption job yet.
 2. **No compute isolation.** The serverless function sandbox runs the model loop,
    but any computer/browser execution must supply its own isolation. The HTTP
    reader never executes JavaScript, which removes a whole class of browser

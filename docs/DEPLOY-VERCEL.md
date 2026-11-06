@@ -47,6 +47,8 @@ panel is open, and the daily cron drains anything left behind.
 | `TALISMAN_SEARCH_URL` | for URL-less research | SearXNG JSON endpoint or APInex base. |
 | `BROWSER_WS_ENDPOINT` | optional | Remote Chromium over CDP; switches `auto` to real browser rendering. |
 | `TALISMAN_MAX_RUN_MS` | optional | Slice budget, default 45000. Keep below the function's `maxDuration`. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | for Calendar | OAuth client (type: Web application). |
+| `GOOGLE_REDIRECT_URI` | optional | Defaults to `<request origin>/api/connectors/google/callback`. |
 
 `vercel.json` sets `maxDuration: 60` and `memory: 1024` for the function, and
 bundles `src/db/schema.sql` with it.
@@ -69,6 +71,22 @@ curl -X POST https://<deployment>/api/internal/migrate \
 
 `GET /api/health` reports `database`, `schema` and the resolved capabilities, so
 a misconfigured deployment fails visibly instead of failing at signup.
+
+## Connecting Google Calendar
+
+1. In Google Cloud, create an OAuth client of type **Web application** and add
+   `https://<deployment>/api/connectors/google/callback` as an authorised
+   redirect URI.
+2. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the Vercel project and
+   redeploy (env changes apply to new deployments).
+3. `CREDENTIAL_ENCRYPTION_KEY` must be set; without it the connector refuses to
+   store tokens rather than writing them in plaintext.
+4. In the console, **Connect Google Calendar**, approve the consent screen, then
+   **Test connection**. That last button performs a real `calendar.list` and
+   reports how many events came back.
+
+Tokens are encrypted per user; disconnecting deletes the row. Rotating
+`CREDENTIAL_ENCRYPTION_KEY` invalidates existing tokens, so users must reconnect.
 
 ## Verifying a deployment
 

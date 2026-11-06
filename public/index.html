@@ -69,6 +69,9 @@
     <button class="primary" id="create">Start task</button>
     <p class="err" id="task-error"></p>
 
+    <h2 style="margin-top:20px">Connectors</h2>
+    <div id="connectors" class="muted">Loading…</div>
+
     <h2 style="margin-top:20px">Tasks</h2>
     <div id="tasks" class="muted">Loading…</div>
   </section>
@@ -142,7 +145,92 @@ function signedIn(user) {
   $("app").classList.remove("hidden");
   $("who").textContent = `${user.email} · ${user.orgId.slice(0, 8)}`;
   $("logout").classList.remove("hidden");
+  loadConnectors();
   loadTasks();
+}
+
+async function loadConnectors() {
+  const target = $("connectors");
+  try {
+    const state = await api("/api/connectors");
+    const outcome = new URLSearchParams(location.search).get("status");
+    target.innerHTML = "";
+    for (const connector of state.connectors) {
+      const row = document.createElement("div");
+      row.className = "task";
+      const label = connector.connected
+        ? "connected"
+        : connector.configured
+          ? "not connected"
+          : "not configured";
+      const tone = connector.connected ? "succeeded" : connector.configured ? "waiting_approval" : "failed";
+      row.innerHTML = `<strong>${escapeHtml(connector.name)}</strong>
+        <div class="row"><span class="pill ${tone}">${label}</span>
+        <span class="muted">${escapeHtml((connector.scopes || []).join(" "))}</span></div>`;
+      const actions = document.createElement("div");
+      actions.className = "row";
+      actions.style.marginTop = "8px";
+      if (connector.connected) {
+        const test = document.createElement("button");
+        test.textContent = "Test connection";
+        test.onclick = async () => {
+          test.disabled = true;
+          try {
+            const result = await api("/api/connectors/google/verify", { method: "POST" });
+            actions.append(` ${result.events} event(s) from Google`);
+          } catch (error) {
+            actions.append(` ${error.message}`);
+          } finally {
+            test.disabled = false;
+          }
+        };
+        const remove = document.createElement("button");
+        remove.textContent = "Disconnect";
+        remove.onclick = async () => {
+          await api("/api/connectors/google", { method: "DELETE" });
+          await loadConnectors();
+        };
+        actions.append(test, remove);
+      } else if (connector.configured) {
+        const connect = document.createElement("button");
+        connect.className = "primary";
+        connect.textContent = "Connect Google Calendar";
+        connect.onclick = async () => {
+          try {
+            const { url } = await api("/api/connectors/google/authorize");
+            location.href = url;
+          } catch (error) {
+            actions.append(` ${error.message}`);
+          }
+        };
+        actions.appendChild(connect);
+      } else {
+        const note = document.createElement("span");
+        note.className = "muted";
+        note.textContent = connector.oauthConfigured
+          ? "CREDENTIAL_ENCRYPTION_KEY is required to store tokens."
+          : "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable this connector.";
+        actions.appendChild(note);
+      }
+      row.appendChild(actions);
+      target.appendChild(row);
+    }
+    if (outcome === "connected") {
+      const note = document.createElement("div");
+      note.className = "muted";
+      note.style.marginTop = "6px";
+      note.textContent = "Google Calendar connected.";
+      target.appendChild(note);
+    } else if (outcome && outcome !== "connected") {
+      const note = document.createElement("div");
+      note.className = "err";
+      note.style.marginTop = "6px";
+      note.textContent = `Google Calendar connection failed (${outcome}).`;
+      target.appendChild(note);
+    }
+  } catch (error) {
+    target.textContent = error.message;
+  }
 }
 
 $("login").onclick = () => auth("login");

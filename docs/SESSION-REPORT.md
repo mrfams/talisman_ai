@@ -1,5 +1,61 @@
 # Session report — 5–6 November 2026
 
+## Milestone 3 — credential encryption and Google Calendar (6 November 2026)
+
+Objective: store connector credentials safely, then wire one real external
+connector end to end.
+
+### What was integrated
+
+| Area | Change | Evidence |
+| --- | --- | --- |
+| Encryption at rest | `src/security/secrets.ts`: AES-256-GCM, random 96-bit IV, AAD binding org + provider + user, base64/hex 32-byte keys | `tests/connectors.test.ts` |
+| Encrypted store | `src/connectors/store.ts` over the existing `provider_credentials` table and RLS | `tests/connectors.test.ts` (per-user isolation, ciphertext has no plaintext) |
+| OAuth | `src/connectors/google.ts`: authorise URL, code exchange, refresh with rotation preserved, refresh-on-401 retry | `tests/connectors.test.ts` |
+| OAuth state | `src/connectors/oauth-state.ts`: HMAC-signed tenant/user/redirect/expiry, no server-side session needed | forged state → 403 |
+| Tools | `calendar_list_events` (read) and `calendar_create_event` (approval required) | `tests/connectors.test.ts`, agent approval test |
+| API | `GET /api/connectors`, `GET .../authorize`, `GET .../callback`, `POST .../verify`, `DELETE ...` | full connect/verify/disconnect flow in tests |
+| Console | connector panel with connect, test and disconnect | code |
+
+### Reuse from upstream
+
+The Calendar request shapes, endpoints and calendar-id validation follow
+`vendor/openmuse/packages/integrations/src/google.ts`. OAuth, token refresh,
+encryption and the approval gate are Talisman's, because OpenMuse's adapter
+assumes a single-owner deployment with an already-authorised token.
+
+### Tests actually run
+
+```
+npx tsc --noEmit                                    exit 0
+npx tsx --test --test-concurrency=1 <7 files>       26/27 pass
+```
+
+The one reported failure is the same file-level teardown artifact seen in the
+previous milestone: `tests/intelligence.test.ts` passes 5/5 when run alone. The
+new connector file passes 5/5, including a complete OAuth callback → encrypted
+token → `calendar.list` → disconnect cycle against a fake Google server.
+
+### Not verified
+
+- **No real Google call.** This deployment has no OAuth client, so the connector
+  reports `not configured` in production. The code path is exercised against a
+  fake Google backend; the real consent screen and a real `calendar.list` need
+  the owner's client id and secret.
+- Gmail, Composio and MCP remain absent.
+- Key rotation has no re-encryption job.
+
+### Next tasks
+
+1. Set `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`, click through consent and mark
+   the connector VERIFIED against real Google.
+2. Add the same encrypted-token plumbing to Gmail, then MCP servers.
+3. Add a key-rotation job that re-wraps stored ciphertexts.
+
+---
+
+# Session report — 5 November 2026
+
 ## Milestone 2 — production deployment (6 November 2026)
 
 Objective: make the working implementation deployable and testable by a real

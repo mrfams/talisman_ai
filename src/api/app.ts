@@ -37,6 +37,11 @@ import type { ArtifactStoreLike } from "../workspace/workspace.js";
 import { applySchema } from "../db/migrate.js";
 import { timingSafeEqual } from "node:crypto";
 import type { TaskEngine } from "../runtime/engine.js";
+import { SecretBox } from "../security/secrets.js";
+import { CredentialStore } from "../connectors/store.js";
+import { GoogleCalendar, type GoogleTokens } from "../connectors/google.js";
+import { signState, verifyState } from "../connectors/oauth-state.js";
+import { calendarTools } from "../connectors/calendar-tools.js";
 import type { ModelRouter } from "../intelligence/router.js";
 import { Agent, type AgentTool } from "../intelligence/agent.js";
 import type { ChatMessage } from "../intelligence/types.js";
@@ -53,6 +58,8 @@ export interface AppDeps {
    * request drives one bounded slice; without it, a separate worker must run.
    */
   engine?: TaskEngine;
+  /** Injectable for tests; otherwise built from config. */
+  google?: GoogleCalendar;
 }
 
 type Env = { Variables: { session: SessionInfo; token: string } };
@@ -127,6 +134,16 @@ function startSession(c: AppContext, deps: AppDeps, token: string): void {
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const app = new Hono<Env>();
+  const credentialStore = new CredentialStore(
+    deps.database,
+    SecretBox.from(deps.config.credentialKey),
+  );
+  const google =
+    deps.google ??
+    new GoogleCalendar({
+      clientId: deps.config.googleClientId,
+      clientSecret: deps.config.googleClientSecret,
+    });
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -159,6 +176,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     // Machine endpoints: authenticated by CRON_SECRET, not by a user session.
     "/api/internal/tick",
     "/api/internal/migrate",
+    // OAuth redirect from Google: authenticated by the signed state, not a cookie.
+    "/api/connectors/google/callback",
   ]);
 
   app.use("/api/*", async (c, next) => {
@@ -405,6 +424,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
           return { memoryId: memory.id };
         },
       },
+      ...calendarTools({
+        google,
+        store: credentialStore,
+        orgId: user.orgId,
+        userId: user.id,
+      }),
     ];
 
     const agent = new Agent(deps.models, tools);
@@ -823,6 +848,108 @@ export function createApp(deps: AppDeps): Hono<Env> {
     );
     if (!deleted) throw errors.notFound("Memory not found");
     return c.json({ ok: true });
+  });
+
+  /* --------------------------------------------------------- connectors */
+
+  const connectorOrigin = (c: AppContext): string => {
+    const host = c.req.header("x-forwarded-host") ?? c.req.header("host");
+    if (!host) return new URL(deps.config.publicUrl).origin;
+    const protocol =
+      c.req.header("x-forwarded-proto") ?? new URL(deps.config.publicUrl).protocol.replace(":", "");
+    return `${protocol}://${host}`;
+  };
+
+  app.get("/api/connectors", async (c) => {
+    const { user } = requireUser(c);
+    const connected = await credentialStore.has(user.orgId, user.id, "google");
+    return c.json({
+      encryption: credentialStore.configured,
+      connectors: [
+        {
+          id: "google",
+          name: "Google Calendar",
+          configured: google.configured && credentialStore.configured,
+          oauthConfigured: google.configured,
+          encryption: credentialStore.configured,
+          connected,
+          scopes: google.scopes,
+          tools: ["calendar_list_events", "calendar_create_event"],
+        },
+      ],
+    });
+  });
+
+  app.get("/api/connectors/google/authorize", (c) => {
+    const { user } = requireUser(c);
+    if (!google.configured) {
+      throw errors.unavailable(
+        "Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.",
+      );
+    }
+    if (!credentialStore.configured) {
+      throw errors.unavailable(
+        "CREDENTIAL_ENCRYPTION_KEY is required before storing connector tokens.",
+      );
+    }
+    if (!deps.config.sessionSecret) {
+      throw errors.unavailable("SESSION_SECRET is required to sign an authorisation request.");
+    }
+    const redirectUri =
+      deps.config.googleRedirectUri ?? `${connectorOrigin(c)}/api/connectors/google/callback`;
+    const state = signState(deps.config.sessionSecret, {
+      orgId: user.orgId,
+      userId: user.id,
+      redirectUri,
+    });
+    return c.json({ url: google.authorizeUrl({ redirectUri, state }) });
+  });
+
+  app.get("/api/connectors/google/callback", async (c) => {
+    const failed = (status: string) => c.redirect(`/?connector=google&status=${status}`);
+    if (c.req.query("error")) return failed("denied");
+    const secret = deps.config.sessionSecret;
+    const state = secret ? verifyState(secret, c.req.query("state")) : null;
+    if (!state) throw errors.forbidden("Invalid or expired authorisation state");
+    const code = c.req.query("code");
+    if (!code) return failed("missing_code");
+    const tokens = await google.exchangeCode(code, state.redirectUri);
+    await credentialStore.save(state.orgId, state.userId, "google", tokens);
+    await deps.database.withTenant(state.orgId, state.userId, (conn) =>
+      recordAudit(conn, {
+        orgId: state.orgId,
+        actorUserId: state.userId,
+        eventType: "connector.connected",
+        targetType: "connector",
+        targetId: "google",
+      }),
+    );
+    return c.redirect("/?connector=google&status=connected");
+  });
+
+  app.post("/api/connectors/google/verify", async (c) => {
+    const { user } = requireUser(c);
+    const tokens = await credentialStore.load<GoogleTokens>(user.orgId, user.id, "google");
+    if (!tokens) throw errors.conflict("Google Calendar is not connected");
+    const { result, tokens: current } = await google.call(tokens, (token) =>
+      google.listEvents(token, { maxResults: 3 }),
+    );
+    if (current !== tokens) {
+      await credentialStore.save(user.orgId, user.id, "google", current);
+    }
+    await audit(deps, requireUser(c), "connector.verified", "connector", "google", {
+      events: result.length,
+    });
+    return c.json({ ok: true, events: result.length, sample: result });
+  });
+
+  app.delete("/api/connectors/google", async (c) => {
+    const { user } = requireUser(c);
+    const removed = await credentialStore.remove(user.orgId, user.id, "google");
+    if (removed) {
+      await audit(deps, requireUser(c), "connector.disconnected", "connector", "google");
+    }
+    return c.json({ ok: true, removed });
   });
 
   return app;

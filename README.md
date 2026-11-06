@@ -35,12 +35,18 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
   over CDP.
 - Two artifact backends: filesystem for long-running hosts, Postgres for
   serverless hosts.
+- Encrypted connector credentials: AES-256-GCM at rest, with the organisation,
+  provider and owner bound into the ciphertext so a row copied to another tenant
+  cannot decrypt.
+- A Google Calendar connector: real OAuth with refresh tokens, per-user encrypted
+  tokens, `calendar_list_events` and `calendar_create_event` tools, and an
+  approval gate on anything that writes to the user's calendar.
 - A web console at `/`, unit/integration tests, a real-Chrome end-to-end test, a
   live deployment check, and CI.
 
-Still not wired: OpenBot's Docker computers and supervisor, Gmail/Calendar,
-MCP/Composio connectors, goals and monitors, credential encryption, semantic
-memory and AG-UI. See the capability matrix for why each is not yet adopted.
+Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
+connectors, goals and monitors, semantic memory and AG-UI. See the capability
+matrix for why each is not yet adopted.
 
 ## Two ways to run it
 
@@ -125,23 +131,29 @@ BASE=https://talisman-agent.vercel.app node scripts/e2e-live.mjs
 Verified on 6 November 2026:
 
 - `tsc --noEmit` clean.
-- **22/22 unit and integration tests pass**: auth (4), tenant isolation (3),
-  task lifecycle and retries (5), serverless slices and Postgres artifacts (4),
-  intelligence (5), API (1). The combined run under `--test-force-exit` can
-  report a file-level teardown error on this memory-constrained machine; every
-  file passes when the runner is allowed to exit normally.
-- **12/12 live checks pass** against the deployment: health, anonymous
+- **27 unit and integration tests pass**: auth (4), tenant isolation (3), task
+  lifecycle and retries (5), serverless slices and Postgres artifacts (4),
+  credential encryption and the Google Calendar connector (5), intelligence (5),
+  API (1). The combined run under `--test-force-exit` can report a file-level
+  teardown error on this memory-constrained machine; every file passes when the
+  runner is allowed to exit normally.
+- **14/14 live checks pass** against the deployment: health, anonymous
   rejection, signup, cross-origin mutation refused, task created, task
   succeeded, all four steps succeeded, PDF downloaded and parsed (1 page, hash
   matches the stored digest), cross-tenant task and artifact access refused,
-  finished task not re-executed. Run with `node scripts/e2e-live.mjs`.
+  finished task not re-executed, connector encryption enabled, and an
+  unconnected connector refusing to execute. Run with
+  `node scripts/e2e-live.mjs`.
 - A real-Chrome run and a research task through the durable engine passed in the
   previous session (`tests/browser.smoke.test.ts`, `tests/e2e.research.test.ts`)
   and were not re-run here.
 
 The live run used real public pages through the HTTP reader and the APInex free
 model tier. It did not exercise a JavaScript-rendered page, a remote CDP browser,
-live web search, or a real Gmail/Calendar connector.
+live web search, or a real Google account. The Calendar connector is verified
+end to end against a fake Google OAuth and Calendar server; a real Google call
+needs your own OAuth client (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`) and one
+consent click, after which "Test connection" returns real events.
 
 ## Attribution
 
