@@ -1,5 +1,6 @@
 package com.clawuse.android;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -48,7 +49,11 @@ final class AgentHttp {
             if (status == 204) return null;
             String text = read(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
             if (status < 200 || status >= 300) throw new HttpError(status, text);
-            return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+            try {
+                return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+            } catch (JSONException invalid) {
+                throw new IOException("Talisman returned invalid JSON", invalid);
+            }
         } finally {
             connection.disconnect();
         }
