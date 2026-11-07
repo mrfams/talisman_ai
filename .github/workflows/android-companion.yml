@@ -24,6 +24,9 @@ jobs:
 
       - name: Set up the Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The action's default list includes the removed `tools` package.
+          packages: platform-tools
 
       - name: Accept licenses and install API 34
         run: |
