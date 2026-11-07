@@ -72,6 +72,7 @@ export interface TaskStep {
   input: Record<string, unknown> | null;
   output: unknown;
   error: string | null;
+  attempts: number;
   startedAt: string | null;
   finishedAt: string | null;
 }

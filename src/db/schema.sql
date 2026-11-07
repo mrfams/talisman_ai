@@ -97,11 +97,15 @@ CREATE TABLE IF NOT EXISTS task_steps (
   input jsonb,
   output jsonb,
   error text,
+  attempts integer NOT NULL DEFAULT 0,
   started_at timestamptz,
   finished_at timestamptz,
   UNIQUE (task_id, position)
 );
 CREATE INDEX IF NOT EXISTS task_steps_task_idx ON task_steps (task_id, position);
+-- Existing deployments predate step-level attempt counts; keep this statement so
+-- applying the schema is always safe and upgrades older databases in place.
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS task_events (
   id text PRIMARY KEY,

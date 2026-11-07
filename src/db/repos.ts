@@ -481,6 +481,7 @@ function mapStep(row: Row): TaskStep {
     input: (row.input as Record<string, unknown> | null) ?? null,
     output: row.output ?? null,
     error: row.error === null ? null : String(row.error),
+    attempts: num(row.attempts),
     startedAt: isoOrNull(row.started_at),
     finishedAt: isoOrNull(row.finished_at),
   };
@@ -493,6 +494,7 @@ export async function updateStep(
     status?: StepStatus;
     output?: unknown;
     error?: string | null;
+    attempts?: number;
     startedAt?: Date | null;
     finishedAt?: Date | null;
   },
@@ -510,6 +512,10 @@ export async function updateStep(
   if (patch.error !== undefined) {
     values.push(patch.error);
     sets.push(`error = $${values.length}`);
+  }
+  if (patch.attempts !== undefined) {
+    values.push(patch.attempts);
+    sets.push(`attempts = $${values.length}`);
   }
   if (patch.startedAt !== undefined) {
     values.push(patch.startedAt);

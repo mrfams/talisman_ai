@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -35,18 +35,66 @@ const STEP_TONE: Record<string, "ok" | "warn" | "bad" | "info" | "plain" | "live
   pending: "plain",
 };
 
-function StepRow({ step }: { step: TaskStep }) {
+const STEP_NODE: Record<string, ReactNode> = {
+  succeeded: <Check size={11} strokeWidth={3} />,
+  failed: <X size={11} strokeWidth={3} />,
+  cancelled: <X size={11} strokeWidth={3} />,
+  waiting_approval: <ShieldQuestion size={11} />,
+};
+
+/** Wall-clock time a step spent executing, or null when it never finished. */
+function duration(step: TaskStep): string | null {
+  if (!step.startedAt || !step.finishedAt) return null;
+  const ms = new Date(step.finishedAt).getTime() - new Date(step.startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+}
+
+function TimelineStep({ step }: { step: TaskStep }) {
+  const retried = step.attempts > 1;
+  const elapsed = duration(step);
+  const hasDetail = step.input !== null || step.output !== null || step.error !== null;
+
   return (
-    <div className="list-item" style={{ alignItems: "center" }}>
-      <span className="mono tiny faint" style={{ width: 22 }}>
-        {String(step.position).padStart(2, "0")}
+    <li className="tl-item" data-state={step.status}>
+      <span className="tl-node" aria-hidden>
+        {step.status === "running" ? <span className="tl-dot" /> : (STEP_NODE[step.status] ?? null)}
       </span>
-      <div className="grow">
-        <div style={{ fontWeight: 550, fontSize: "var(--text-sm)" }}>{step.title}</div>
-        {step.error ? <div className="tiny error-text">{step.error}</div> : null}
+      <div className="tl-body">
+        <div className="tl-head">
+          <span className="mono tiny faint">{String(step.position + 1).padStart(2, "0")}</span>
+          <span className="tl-title">{step.title}</span>
+          <Badge tone={STEP_TONE[step.status] ?? "plain"}>
+            {step.status.replace(/_/g, " ")}
+          </Badge>
+        </div>
+        <div className="tl-meta">
+          <span>{step.kind}</span>
+          {retried ? (
+            <span className="tl-retry" title={`Execution started ${step.attempts} times`}>
+              <RotateCcw size={9} aria-hidden /> {step.attempts} attempts
+            </span>
+          ) : null}
+          {elapsed ? <span>{elapsed}</span> : null}
+          {step.finishedAt
+            ? <span>ended {timeAgo(step.finishedAt)}</span>
+            : step.startedAt
+              ? <span>started {timeAgo(step.startedAt)}</span>
+              : null}
+        </div>
+        {step.error ? <div className="tl-error">{step.error}</div> : null}
+        {hasDetail ? (
+          <details className="tl-detail">
+            <summary>Input and output</summary>
+            <pre>{JSON.stringify({ input: step.input, output: step.output }, null, 2)}</pre>
+          </details>
+        ) : null}
       </div>
-      <Badge tone={STEP_TONE[step.status] ?? "plain"}>{step.status.replace("_", " ")}</Badge>
-    </div>
+    </li>
   );
 }
 
@@ -251,27 +299,30 @@ export function TaskDetail() {
         </Card>
       ) : null}
 
-      <div className="grid-2" style={{ alignItems: "start" }}>
-        <Card flush>
-          <div className="card-head">
-            <h2 className="section-title">Plan</h2>
-            <span className="tiny faint">
-              {steps.filter((step) => step.status === "succeeded").length}/{steps.length} done
-            </span>
+      <Card flush>
+        <div className="card-head">
+          <h2 className="section-title">Timeline</h2>
+          <span className="tiny faint">
+            {steps.filter((step) => ["succeeded", "skipped"].includes(step.status)).length} of{" "}
+            {steps.length} done
+          </span>
+        </div>
+        {steps.length === 0 ? (
+          <div className="card-body">
+            <p className="small muted">
+              The plan is written when the run first executes. Nothing has started yet.
+            </p>
           </div>
-          {steps.length === 0 ? (
-            <div className="card-body">
-              <p className="small muted">No steps recorded yet.</p>
-            </div>
-          ) : (
-            <div className="list">
-              {steps.map((step) => (
-                <StepRow key={step.id} step={step} />
-              ))}
-            </div>
-          )}
-        </Card>
+        ) : (
+          <ol className="timeline">
+            {steps.map((step) => (
+              <TimelineStep key={step.id} step={step} />
+            ))}
+          </ol>
+        )}
+      </Card>
 
+      <div className="grid-2" style={{ alignItems: "start" }}>
         <Card flush>
           <div className="card-head">
             <h2 className="section-title">Artifacts</h2>
@@ -304,19 +355,18 @@ export function TaskDetail() {
             </div>
           )}
         </Card>
-      </div>
 
-      <Card flush>
-        <div className="card-head">
-          <h2 className="section-title">Execution log</h2>
-          <span className="tiny faint">{events.length} events</span>
-        </div>
-        {events.length === 0 ? (
-          <div className="card-body">
-            <p className="small muted">The run has not written an event yet.</p>
+        <Card flush>
+          <div className="card-head">
+            <h2 className="section-title">Execution log</h2>
+            <span className="tiny faint">{events.length} events</span>
           </div>
-        ) : (
-          <div style={{ maxHeight: 380, overflow: "auto" }}>
+          {events.length === 0 ? (
+            <div className="card-body">
+              <p className="small muted">The run has not written an event yet.</p>
+            </div>
+          ) : (
+            <div className="list-scroll">
             {events.map((event) => (
               <div
                 key={event.id}
@@ -342,11 +392,12 @@ export function TaskDetail() {
                   <div className="small">{event.title}</div>
                   {event.detail ? <div className="tiny faint">{event.detail}</div> : null}
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }

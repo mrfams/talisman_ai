@@ -106,6 +106,8 @@ export interface TaskStep {
   input: Record<string, unknown> | null;
   output: unknown;
   error: string | null;
+  /** How many times execution started for this step, across slices and retries. */
+  attempts: number;
   startedAt: string | null;
   finishedAt: string | null;
 }

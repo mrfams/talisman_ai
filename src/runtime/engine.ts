@@ -266,6 +266,8 @@ export class TaskEngine {
         await updateStep(conn, step.id, {
           status: "running",
           error: null,
+          // Counts every execution, so a resumed slice and a retry both show up.
+          attempts: step.attempts + 1,
           startedAt: new Date(),
           finishedAt: null,
         });
