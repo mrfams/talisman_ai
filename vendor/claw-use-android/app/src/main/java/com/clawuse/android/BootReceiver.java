@@ -1,0 +1,41 @@
+package com.clawuse.android;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+import android.util.Log;
+
+/**
+ * Starts BridgeService automatically on device boot.
+ * The AccessibilityService (AccessibilityBridge) is managed by the system
+ * and will reconnect on its own if enabled in Settings.
+ */
+public class BootReceiver extends BroadcastReceiver {
+    private static final String TAG = "ClawBoot";
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
+            if (!ConfigStore.get(context).isBridgeEnabled()) {
+                Log.i(TAG, "Boot completed — bridge disabled by user, not starting");
+                return;
+            }
+            Log.i(TAG, "Boot completed — starting Talisman companion");
+            if (TalismanStore.get(context).isPaired()) {
+                Intent agentIntent = new Intent(context, TalismanAgentService.class);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(agentIntent);
+                } else {
+                    context.startService(agentIntent);
+                }
+            }
+            Intent serviceIntent = new Intent(context, BridgeService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent);
+            } else {
+                context.startService(serviceIntent);
+            }
+        }
+    }
+}

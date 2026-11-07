@@ -1,311 +1,379 @@
-# Phone companion protocol (v0)
+# Phone companion protocol (v1)
 
-**Status:** proposed contract for the Android companion and the Talisman Bridge. No implementation
-yet. This is deliberately small: a queue, three device endpoints, one command envelope, one result
-envelope, and a frame upload.
+**Status:** the backend queue, pairing, frame storage, legacy transport adapter, and the Android
+companion source are implemented. The Android APK has **not** been compiled on this machine: there
+is no Android SDK or JDK 17, and the only volume had 797 MB free. Do not describe the APK or a real
+phone run as verified until that build and a live pairing test have both happened.
 
-The goal is that the executor can be replaced (Claw Use fork now, first-party app later) without
-changing the server or the agent tools.
-
----
-
-## 1. Tables
-
-```sql
--- one row per paired phone
-CREATE TABLE phone_devices (
-  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  org_id         uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  user_id        uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  name           text NOT NULL,
-  platform       text NOT NULL CHECK (platform IN ('android', 'ios', 'bridge')),
-  model          text,
-  os_version     text,
-  app_version    text,
-  public_key     text,                 -- base64url, optional for v0
-  token_hash     text NOT NULL,        -- sha256(secret), never the secret
-  status         text NOT NULL DEFAULT 'active'
-                 CHECK (status IN ('active', 'paused', 'revoked')),
-  capabilities   jsonb NOT NULL DEFAULT '{}'::jsonb,
-  settings       jsonb NOT NULL DEFAULT '{}'::jsonb, -- allowlist, retention, screenshot policy
-  last_seen_at   timestamptz,
-  created_at     timestamptz NOT NULL DEFAULT now(),
-  revoked_at     timestamptz
-);
-
--- one row per action the agent wants the phone to take
-CREATE TABLE phone_commands (
-  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  device_id       uuid NOT NULL REFERENCES phone_devices(id) ON DELETE CASCADE,
-  run_id          uuid REFERENCES tasks(id) ON DELETE SET NULL,
-  step_id         uuid REFERENCES task_steps(id) ON DELETE SET NULL,
-  approval_id     uuid,
-  idempotency_key text NOT NULL,
-  op              text NOT NULL,
-  args            jsonb NOT NULL DEFAULT '{}'::jsonb,
-  args_hash       text,
-  status          text NOT NULL DEFAULT 'queued'
-                  CHECK (status IN ('queued', 'claimed', 'done', 'error', 'expired', 'cancelled')),
-  expires_at      timestamptz NOT NULL,
-  claimed_at      timestamptz,
-  completed_at    timestamptz,
-  result          jsonb,
-  error           text,
-  created_at      timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (device_id, idempotency_key)
-);
-
-CREATE INDEX phone_commands_queue
-  ON phone_commands (device_id, status, created_at)
-  WHERE status = 'queued';
-
--- latest frame per device; overwritten, not a history
-CREATE TABLE phone_frames (
-  device_id   uuid PRIMARY KEY REFERENCES phone_devices(id) ON DELETE CASCADE,
-  seq         bigint NOT NULL DEFAULT 0,
-  jpeg        bytea NOT NULL,
-  width       int,
-  height      int,
-  captured_at timestamptz NOT NULL DEFAULT now()
-);
-```
-
-The existing `devices` concept in `docs/PHONE-HARNESS.md` becomes `phone_devices`; the old
-`PHONE_BRIDGE_URL` transport stays for local harnesses but is no longer the primary path.
+The phone is the host. Talisman is a mailbox and planner; it never opens an inbound port on the
+phone. The companion polls outbound, claims one command, executes it, and posts one result.
 
 ---
 
-## 2. Endpoints
+## 1. Identity and storage
 
-All endpoints are HTTPS, JSON unless stated. Device endpoints authenticate with a device token;
-browser endpoints use the normal session cookie.
+IDs are text:
 
-### Pairing (browser + device)
+- device id: 32 lowercase hex characters from 16 random bytes;
+- command, pairing, run, step, and approval ids: the platform's existing text ids;
+- device token: `<32-hex-device-id>.<base64url-secret>` where the secret is 32 random bytes.
 
-`POST /api/phone/pair/start` (session auth)
+The server stores only `sha256("device:" + secret)` in `phone_devices.token_hash`. The plaintext
+token is returned once by `POST /api/phone/pair/claim` and never listed again.
+
+Pairing codes are 8 characters from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`, displayed as `XXXX-XXXX`,
+with a 5-minute TTL and a single claim. The code is stored as
+`sha256("pair:" + normalized-code)`.
+
+Tables are defined in `src/db/schema.sql`:
+
+- `phone_pairing_codes` and `phone_devices` are deliberately **outside RLS**: token lookup happens
+  before a tenant transaction exists. Every query against them filters `org_id`/`user_id`
+  explicitly.
+- `phone_commands` and `phone_frames` carry `org_id` and `user_id` and are protected by the same
+  forced RLS policy as every other tenant table.
+
+There is no PIN, password, pattern, or lock-credential storage anywhere in the companion.
+
+---
+
+## 2. Pairing
+
+### Start (browser session)
+
+`POST /api/phone/pair/start`
 
 ```json
 { "platform": "android", "name": "Pixel 9" }
-→ { "code": "7K4M-2Q9X", "expires_at": "2026-11-07T12:05:00Z",
-    "qr": "https://talisman-agent.vercel.app/phone/pair#code=7K4M-2Q9X" }
 ```
 
-`POST /api/phone/pair/claim` (no session; the code is the secret)
+Response `201`:
 
 ```json
-{ "code": "7K4M-2Q9X", "platform": "android", "model": "Pixel 9",
-  "os_version": "16", "app_version": "0.1.0", "public_key": "..." }
-→ { "device_id": "uuid", "token": "uuid.32-byte-secret", "name": "Pixel 9" }
+{
+  "code": "7K4M-2Q9X",
+  "expiresAt": "2026-11-07T12:05:00.000Z",
+  "qr": "https://talisman.example/phone/pair#code=7K4M-2Q9X",
+  "server": "https://talisman.example"
+}
 ```
 
-Rules: code is 8 characters from an unambiguous alphabet, 5-minute TTL, single use, rate-limited
-by IP and code; the token is returned exactly once. The device stores it in Keystore-encrypted
-preferences.
+`qr` is an optional deep link. The fragment is not sent to the HTTP server. The Android UI currently
+accepts manual code entry; scanning is not implemented yet.
 
-### Work loop (device auth)
+### Claim (device, code is the secret)
+
+`POST /api/phone/pair/claim`
+
+```json
+{
+  "code": "7K4M-2Q9X",
+  "platform": "android",
+  "model": "Pixel 9",
+  "os_version": "16",
+  "app_version": "0.1.0",
+  "capabilities": { "observe": true, "act": true, "flow": true, "apps": true, "status": true }
+}
+```
+
+Response `201`:
+
+```json
+{
+  "deviceId": "0123456789abcdef0123456789abcdef",
+  "token": "0123456789abcdef0123456789abcdef.<secret>",
+  "name": "Pixel 9",
+  "platform": "android"
+}
+```
+
+The claim is transactional: the code is marked claimed, the device row is created, and the token
+hash is written together. A second claim gets `422`. Expiry and single use are enforced. Per-IP
+rate limiting and attempt lockout are **not** implemented yet; the 5-minute TTL and single use are
+the current controls.
+
+The Android app stores the server URL and token in `EncryptedSharedPreferences` backed by the
+Android Keystore (`TalismanStore`).
+
+---
+
+## 3. Device loop
+
+All device routes authenticate with `Authorization: Bearer <deviceId>.<secret>` and return `401`
+for a missing, revoked, or forged token.
+
+### Poll
 
 `POST /api/phone/agent/poll`
 
-Headers: `Authorization: Bearer <device_id>.<secret>`
-
-- Long-poll: check for a queued command for this device; if none, sleep 1 s and repeat for up to
-  25 s (stay under the Vercel function limit), then return `204`.
-- Claim atomically:
-
-```sql
-UPDATE phone_commands
-SET status = 'claimed', claimed_at = now()
-WHERE id = (
-  SELECT id FROM phone_commands
-  WHERE device_id = $1 AND status = 'queued' AND expires_at > now()
-  ORDER BY created_at
-  FOR UPDATE SKIP LOCKED
-  LIMIT 1
-)
-RETURNING id, op, args, run_id, step_id, approval_id, expires_at;
-```
-
-- Update `phone_devices.last_seen_at` at most once per poll (not every second).
-
-Response:
+Long-polls up to 20 seconds at the HTTP layer (the service caps its own wait at 25 seconds), claims
+one queued command atomically with `FOR UPDATE SKIP LOCKED`, and returns `204` when there is none.
 
 ```json
-{ "command": {
-    "id": "uuid", "op": "act",
-    "args": { "action": "tap_ref", "ref": 3 },
-    "run_id": "uuid", "step_id": "uuid",
+{
+  "command": {
+    "id": "cmd_...",
+    "op": "observe",
+    "args": { "include": "all", "screenshot": true },
+    "run_id": null,
+    "step_id": null,
     "approval_id": null,
-    "args_hash": "sha256:...",
-    "expires_at": "2026-11-07T12:03:10Z"
-} }
+    "args_hash": null,
+    "expires_at": "2026-11-07T12:03:10.000Z"
+  }
+}
 ```
+
+A command is claimable only while it is `queued` and unexpired. An expired queued command is marked
+`expired` rather than delivered. Polling also touches `last_seen_at`.
+
+### Result
 
 `POST /api/phone/agent/result`
 
 ```json
-{ "command_id": "uuid", "status": "done",
-  "result": { "ok": true, "observed": { "package": "com.whatsapp", "refs": 12 } },
-  "duration_ms": 840 }
+{
+  "command_id": "cmd_...",
+  "status": "done",
+  "result": { "ok": true, "screen": { "package": "com.whatsapp", "nodes": [] } },
+  "duration_ms": 840
+}
 ```
 
 or
 
 ```json
-{ "command_id": "uuid", "status": "error", "error": "secure_window" }
+{ "command_id": "cmd_...", "status": "error", "error": "secure_window" }
 ```
 
-The server ignores a result for a command that is not `claimed` (idempotent retries).
+The result is accepted only for this device's claimed command. Repeating the same result is
+idempotent: the response is `{ "ok": true, "updated": false, "status": "done" }` rather than an
+error.
 
-`POST /api/phone/agent/frame` (`Content-Type: image/jpeg`, max 300 KB)
+### Frame
 
-Header: `X-Talisman-Seq: 42`. The server replaces `phone_frames` for the device. Only called when
-a viewer is active or the command asked for a screenshot.
+`POST /api/phone/agent/frame`
 
-`POST /api/phone/agent/heartbeat` (optional; poll already updates presence)
+Headers:
+
+- `Content-Type: image/jpeg`
+- `X-Talisman-Seq: 42` (non-negative safe integer)
+- optional `X-Talisman-Width`, `X-Talisman-Height`
+
+The body is at most 300 KB. The server replaces the one `phone_frames` row for the device; it does
+not keep a history. The browser reads it from `GET /api/devices/:id/frame`, which responds with
+`cache-control: no-store`, `x-talisman-seq`, and `x-talisman-captured-at`, or `404` when there is no
+frame.
+
+### Heartbeat
+
+`POST /api/phone/agent/heartbeat`
 
 ```json
-{ "battery": 0.72, "charging": true, "screen": "on", "a11y": true, "locked": false }
+{
+  "battery": 0.72,
+  "charging": true,
+  "screen": "on",
+  "a11y": true,
+  "locked": false,
+  "warnings": [],
+  "network": "wifi",
+  "app_version": "0.1.0"
+}
 ```
 
-### Browser / run endpoints
-
-- `GET /api/devices` → list with status, battery, last seen, capabilities, settings.
-- `DELETE /api/devices/:id` → revoke; queued commands become `cancelled`.
-- `POST /api/devices/:id/pause` / `resume` → status toggle; the companion stops claiming commands.
-- `GET /api/devices/:id/frame` → latest JPEG, `Cache-Control: no-store`; 404 when none.
-- `POST /api/devices/:id/op` → manual/debug op, always approval-gated and audit-logged.
-- `GET /api/devices/:id/diagnostics` → permissions, AAPM, battery optimization, last error.
+The values are merged into `phone_devices.diagnostics` with a timestamp. Polling already updates
+presence; the Android service sends a heartbeat every 30 seconds.
 
 ---
 
-## 3. Ops
+## 4. Browser and management routes
 
-Keep the surface small enough to implement safely. Coordinates are device pixels. Refs are only
-valid for the observation that produced them; a new observation invalidates old refs.
+All browser routes use the normal Talisman session.
 
-| Op | Args | Returns | Risk |
-| --- | --- | --- | --- |
-| `observe` | `screenshot?: bool`, `include?: "interactive" \| "all"` | package, activity, nodes, optional JPEG | none |
-| `act` | `action: tap_ref \| tap \| long_press \| type \| swipe \| scroll \| global \| launch \| deep_link` | ack + observed package | action-dependent |
-| `flow` | `steps: Step[]` | per-step results | action-dependent |
-| `apps` | `include_system?: bool` | launchable packages + labels | none |
-| `status` | — | battery, screen, locked, a11y, version | none |
+| Route | Behaviour |
+| --- | --- |
+| `GET /api/devices` | paired devices via `publicDevice`, plus `legacy`, `protocol`, `minApp`, `ops`, and a hint. Secrets are never included. |
+| `GET /api/devices/:id` | one tenant-scoped device |
+| `DELETE /api/devices/:id` | revoke, rotate to an unissued hash, cancel queued work |
+| `POST /api/devices/:id/pause` | set `paused`, cancel queued work |
+| `POST /api/devices/:id/resume` | set `active`; rejects revoked devices |
+| `POST /api/devices/:id/rotate` | return a new plaintext token once, invalidating the old one |
+| `PATCH /api/devices/:id/settings` | replace settings JSON (16 KB limit) |
+| `GET /api/devices/:id/diagnostics` | device, diagnostics, capabilities, settings |
+| `GET /api/devices/:id/frame` | latest JPEG or 404 |
+| `POST /api/devices/:id/op` | **read-only** manual ops: `observe`, `apps`, `status` |
 
-`act` examples:
+`POST /api/devices/:id/op` exists for diagnosis. It rejects every mutating op with `403`: actions
+must travel through a run with an approval, not through a second console path.
 
-```json
-{ "action": "tap_ref", "ref": 3 }
-{ "action": "tap", "x": 540, "y": 1180 }
-{ "action": "type", "ref": 5, "text": "I'll be 10 minutes late", "submit": true }
-{ "action": "swipe", "direction": "up", "distance": 0.6 }
-{ "action": "global", "name": "back" }
-{ "action": "launch", "package": "com.whatsapp" }
-{ "action": "deep_link", "uri": "whatsapp://send?text=..." }
-```
+The legacy `POST /api/devices/op` route remains for the cloud/bridge `PhoneTransport`; it is not
+used by the companion.
 
-`flow` step:
+---
 
-```json
-{ "wait_for": { "text": "Send", "timeout_ms": 8000 },
-  "then": { "action": "tap_text", "text": "Send" },
-  "optional": false }
-```
+## 5. Ops and result shapes
 
-The executor polls the tree every 100–250 ms for `wait_for`, then acts. It stops on the first
-non-optional failure and returns the failing index and the last observed screen. Flows are stored
-on the device and versioned by app version; the server keeps a copy for portability.
+The companion implements five ops. Coordinates are device pixels. Refs are valid only for the
+observation that produced them; a new observation invalidates old refs.
 
-### Result envelope
+### `observe`
+
+Args: `{ "screenshot": true|false }`. `include` is accepted for compatibility but the current
+Android implementation returns all accessibility nodes.
 
 ```json
 {
   "ok": true,
-  "data": {},
   "screen": {
     "package": "com.whatsapp",
-    "activity": "com.whatsapp.Conversation",
-    "refs": 18,
-    "hash": "sha256:...",
+    "nodes": [
+      {
+        "ref": 3,
+        "text": "Send",
+        "desc": "",
+        "class": "android.widget.Button",
+        "bounds": { "x": 840, "y": 2100, "w": 180, "h": 96 },
+        "clickable": true,
+        "editable": false,
+        "password": false
+      }
+    ],
     "secure": false
   },
-  "timing": { "observe_ms": 90, "act_ms": 240 },
-  "warnings": []
+  "width": 1080,
+  "height": 2400,
+  "data": { "package": "com.whatsapp" },
+  "screenshot": { "mime": "image/jpeg", "base64": "..." }
 }
 ```
 
-Errors are stable codes, not prose: `secure_window`, `locked`, `a11y_off`, `restricted_settings`,
-`no_network`, `app_not_found`, `ref_stale`, `timeout`, `cancelled`, `approval_mismatch`,
-`denied_package`, `aapm_blocked`.
+With `screenshot: true`, the companion uploads the same JPEG to the frame endpoint and includes the
+base64 in the result. Screenshots are capped at 300 KB and require Android API 30+.
+
+### `act`
+
+```json
+{ "action": "tap_ref", "ref": 3 }
+{ "action": "tap", "x": 540, "y": 1180 }
+{ "action": "long_press", "ref": 3 }
+{ "action": "long_press", "x": 540, "y": 1180 }
+{ "action": "type", "text": "I'll be 10 minutes late", "ref": 5, "submit": true }
+{ "action": "swipe", "direction": "up" }
+{ "action": "swipe", "x1": 540, "y1": 1800, "x2": 540, "y2": 600 }
+{ "action": "scroll", "direction": "down" }
+{ "action": "global", "name": "back" }
+{ "action": "launch", "package": "com.whatsapp" }
+{ "action": "deep_link", "uri": "https://example.com/path" }
+```
+
+`global` accepts `back`, `home`, or `recents`. `launch` and `deep_link` are checked by
+`SafetyPolicy`. `type` currently returns a `submit_not_supported` warning if `submit` is requested;
+the caller must tap Send separately.
+
+Response:
+
+```json
+{ "ok": true, "action": "tap", "result": { "ok": true } }
+```
+
+### `flow`
+
+Args:
+
+```json
+{
+  "steps": [
+    {
+      "wait_for": { "text": "Send", "timeout_ms": 8000 },
+      "then": { "action": "tap_text", "text": "Send" },
+      "optional": false
+    }
+  ]
+}
+```
+
+The current Android translation supports `tap_text`/`tap`, `global` (`back`/`home`), and `none`.
+Unsupported steps fail with `unsupported_step`. The first non-optional failure stops the flow.
+
+### `apps`
+
+`{ "include_system": false }` returns launchable packages and labels, excluding the local
+`SafetyPolicy` denylist. System apps are omitted unless `include_system` is true or the package is
+the Settings app.
+
+### `status`
+
+Returns `ok`, `app_version`, `protocol`, battery, charging, screen, locked, a11y, model,
+OS version, and AAPM where available. A partial snapshot is still returned if an Android API is
+unavailable.
+
+### Stable error codes
+
+`locked`, `screen_off`, `secure_window`, `a11y_off`, `denied_package`, `ref_stale`,
+`invalid_action`, `invalid_flow`, `unsupported_step`, `screenshot_failed`, `screenshot_too_large`,
+`approval_required`, `approval_mismatch`, `unsupported`, `internal`.
 
 ---
 
-## 4. Risk classes and approvals
+## 6. Safety policy
 
-Every `act` is classified **before** it is queued:
+The Android companion enforces, before executing an op:
 
-- `read` — observe, apps, status. No approval.
-- `navigate` — back/home/recents, scroll, launch, deep link to a non-destructive screen. No approval.
-- `input` — typing into a non-sensitive field. Approval once per run for the app, unless the
-  payload is a message/comment/post.
-- `outward` — send, post, reply, follow, call, book, order. Approval with exact payload.
-- `money` — pay, transfer, purchase. Approval with amount and recipient; never auto-approve.
-- `destructive` — delete, archive, block, unsubscribe. Approval.
-- `sensitive` — passwords, OTP, card numbers, government IDs. The executor refuses; hand off.
+- a hard package denylist for banking, password managers, authenticators, and system settings-like
+  surfaces; `SafetyPolicy.isDenied` is used by both `apps` and each action;
+- no operation on a secure/password window; the result is `secure_window`, and screenshots are not
+  taken;
+- no auto-unlock: a locked phone returns `locked`; the owner must unlock it;
+- no stored lock credential and no PIN/password UI;
+- deep links must pass `SafetyPolicy.requireSafeUri`;
+- loopback-only local bridge at `127.0.0.1:7333`, guarded by an encrypted local token; the bridge is
+  not exposed on the LAN and its notification no longer prints the token or URL.
 
-The runtime creates an `approvals` row with `{device_id, run_id, op, args, preview}`; on approve it
-queues the command with `approval_id` and `args_hash`. The companion verifies that the args it
-executes still hash to `args_hash`; if not, it returns `approval_mismatch` and does nothing.
+The engine marks `phone_tap_text`, `phone_type`, and `phone_open_app` as `requiresApproval`.
+`Agent` default-denies a tool marked `requiresApproval` when no approval callback is supplied.
+`Agent` currently does not pass an approval id to the tool, and `CompanionPhone` enqueues actions
+without an `approval_id`. The Android verifier refuses `act` and `flow` unless **both** `approval_id` and
+`args_hash` are present, then checks that the arguments hash to the approved
+value. Read-only ops do not require an approval. Therefore:
 
-The companion also enforces:
-- package allowlist (default: user-selected apps);
-- package denylist (banking, password managers, authenticators, settings) — denied unless the user
-  explicitly overrides, and some are permanently denied;
-- secure windows: no screenshot, no tree text beyond the package name; return `secure_window`;
-- screen must be on and unlocked; otherwise `locked` and the run pauses for the user.
+- read-only observation is usable now;
+- phone actions are intentionally denied by the default-deny engine path;
+- **approval-id binding and the chat approval flow are the next required step** before any action
+  is described as production-ready. Until then, do not add an `approve` callback that executes a
+  phone action without also threading the approval id and checking the approved row/hash on the
+  server.
 
----
-
-## 5. Pairing and token details
-
-- Secret: 32 random bytes, base64url. Stored server-side only as `sha256(secret)`.
-- Device header: `Authorization: Bearer <device_id>.<secret>`; constant-time compare.
-- Rotation: `POST /api/devices/:id/rotate` returns a new secret once; the old one is invalid
-  immediately. The companion re-pairs if it cannot authenticate.
-- Revocation: deletes `token_hash`, sets `status='revoked'`, cancels queued commands. The
-  companion's next poll gets `401` and stops.
-- Pairing code: 8 chars from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ`, 5 min, one use, max 5 attempts.
-- No device secret ever appears in logs, the browser, or a screenshot.
+The server-side `approval_id` column, `args_hash`, and Android `CanonicalJson` verifier already
+exist for that wiring.
 
 ---
 
-## 6. Retention and redaction
+## 7. Versioning and tests
 
-- Frames: default delete after the run ends; `phone_frames` is overwritten and has a TTL sweep.
-- Tree text: stored in the run step with a redactor for emails, phone numbers, card-like numbers,
-  and 4–8 digit codes. The raw tree is available to the model only for the current step.
-- OTP: read only if the user enabled "read verification codes" for that device; the code is never
-  written to the transcript unredacted and is not stored after the step.
-- Audit: args are stored redacted; the exact approved payload is stored on the approval row until
-  the run is deleted.
+`GET /api/phone/agent/version` returns:
 
----
+```json
+{ "protocol": 1, "min_app": "0.1.0" }
+```
 
-## 7. Versioning
+The companion sends `X-Talisman-App` and `X-Talisman-Protocol` on its JSON requests. Protocol
+changes are additive; breaking changes should use a new path and keep the previous version for one
+release.
 
-- `GET /api/phone/agent/version` returns `{ "protocol": 1, "min_app": "0.1.0" }`.
-- The companion sends `X-Talisman-App` and `X-Talisman-Protocol` on every request.
-- The server refuses commands the app's `capabilities` do not include, with `unsupported`.
-- Protocol changes are additive; breaking changes bump the path (`/api/phone/v2/...`) and the app
-  supports the previous version for one release.
+Verified on 7 November 2026:
 
----
+- server `tsc --noEmit`: pass;
+- app `tsc -p app/tsconfig.json --noEmit`: pass;
+- `tests/phone-queue.test.ts`: 4/4 pass — single-use/tenant-scoped pairing and hashed tokens,
+  atomic claim/idempotent result/tenant-scoped frames, pause/rotate/revoke, and expired-command plus
+  canonical-hash checks;
+- `CanonicalJson` on Android has a matching Node test only for the Node implementation; a JVM/Node
+  cross-check is still pending.
 
-## 8. Test plan
+Not verified:
 
-- Fake companion (Node) that implements poll/result/frame against a real test database; covers
-  claim atomicity, expiry, idempotency, revocation, approval mismatch, and stale refs.
-- Contract tests for every op and every error code; no Android emulator required.
-- One opt-in live test (`PHONE_LIVE=1`) against a real Android phone; never reported as passed
-  when skipped.
-- Security tests: replayed result, forged token, expired command, changed args after approval,
-  secure window, denied package, revoked device.
+- Android compilation (no SDK/JDK) and therefore no APK;
+- a real phone pairing, AccessibilityService run, screenshot, or live model action;
+- chat approval UI and approval-id binding (see §6);
+- frame retention/redaction and per-IP pairing rate limiting (not implemented).

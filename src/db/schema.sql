@@ -204,6 +204,88 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
   UNIQUE (org_id, provider, label)
 );
 
+-- Phone pairing and devices are read before a tenant context exists: the
+-- device proves itself with a bearer token, and only then do we know its org
+-- and user. They are therefore outside RLS and are only ever queried with
+-- explicit predicates. Commands and frames carry the tenant columns and are
+-- protected.
+CREATE TABLE IF NOT EXISTS phone_pairing_codes (
+  id text PRIMARY KEY,
+  code_hash text NOT NULL UNIQUE,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform text NOT NULL CHECK (platform IN ('android','ios','bridge')),
+  name text NOT NULL,
+  attempts integer NOT NULL DEFAULT 0,
+  expires_at timestamptz NOT NULL,
+  claimed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS phone_pairing_codes_expiry_idx
+  ON phone_pairing_codes (expires_at);
+
+CREATE TABLE IF NOT EXISTS phone_devices (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  platform text NOT NULL CHECK (platform IN ('android','ios','bridge')),
+  model text,
+  os_version text,
+  app_version text,
+  token_hash text NOT NULL UNIQUE,
+  status text NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active','paused','revoked')),
+  capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
+  settings jsonb NOT NULL DEFAULT '{"allow_all":true,"screenshots":true}'::jsonb,
+  diagnostics jsonb NOT NULL DEFAULT '{}'::jsonb,
+  last_seen_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  revoked_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS phone_devices_user_idx
+  ON phone_devices (org_id, user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS phone_commands (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id text NOT NULL REFERENCES phone_devices(id) ON DELETE CASCADE,
+  run_id text REFERENCES tasks(id) ON DELETE SET NULL,
+  step_id text REFERENCES task_steps(id) ON DELETE SET NULL,
+  approval_id text REFERENCES approvals(id) ON DELETE SET NULL,
+  idempotency_key text NOT NULL,
+  op text NOT NULL CHECK (op IN ('observe','act','flow','apps','status')),
+  args jsonb NOT NULL DEFAULT '{}'::jsonb,
+  args_hash text,
+  status text NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','claimed','done','error','expired','cancelled')),
+  expires_at timestamptz NOT NULL,
+  claimed_at timestamptz,
+  completed_at timestamptz,
+  result jsonb,
+  error text,
+  duration_ms integer,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (device_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS phone_commands_queue_idx
+  ON phone_commands (device_id, status, created_at)
+  WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS phone_commands_run_idx ON phone_commands (run_id);
+
+-- Latest frame per device. Overwritten, never a history.
+CREATE TABLE IF NOT EXISTS phone_frames (
+  device_id text PRIMARY KEY REFERENCES phone_devices(id) ON DELETE CASCADE,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  seq bigint NOT NULL DEFAULT 0,
+  jpeg bytea NOT NULL,
+  width integer,
+  height integer,
+  captured_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- Row level security for every tenant table. Missing context => no rows.
 DO $$
 DECLARE
@@ -212,7 +294,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'conversations','messages','tasks','task_steps','task_events',
     'approvals','artifacts','artifact_blobs','memories','audit_events',
-    'provider_credentials'
+    'provider_credentials','phone_commands','phone_frames'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);

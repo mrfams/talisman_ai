@@ -45,15 +45,19 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
 - A real application at `/`: Today, streaming Chat, Runs and run detail,
   Artifacts, Approvals, Connectors, Devices, Activity, Team and Settings, in light
   and dark themes on desktop and mobile.
-- Phone control over Phone Harness (MIT, vendored): a cloud phone through its
-  HTTPS control API, or your own iPhone/Android through a local bridge, with five
-  agent tools and approval on every tap that can send or submit.
+- Phone-hosted Android companion (forked from Claw Use, MIT): pair a sideloaded
+  companion, queue `observe`/`act`/`flow`/`apps`/`status` commands, inspect the
+  latest JPEG frame, pause or revoke a device, and keep the old Phone Harness
+  cloud/bridge transport as a compatibility adapter. See
+  [`docs/PHONE-COMPANION-PROTOCOL.md`](docs/PHONE-COMPANION-PROTOCOL.md).
 - Unit/integration tests, a real-Chrome end-to-end test, a live deployment check,
   and CI.
 
 Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
-connectors, goals and monitors, semantic memory and AG-UI. See the capability
-matrix for why each is not yet adopted.
+connectors, goals and monitors, semantic memory and AG-UI. The phone companion
+is not production-ready yet: its APK has not been compiled here, and phone
+actions still need approval-id binding plus a chat approval flow. See the
+protocol document for the exact boundary.
 
 ## Two ways to run it
 
@@ -167,7 +171,10 @@ is verified end to end against a fake Google OAuth and Calendar server; a real
 Google call needs your own OAuth client (`GOOGLE_CLIENT_ID` /
 `GOOGLE_CLIENT_SECRET`) and one consent click. Phone control is verified against
 a fake control service and a fake bridge; a real phone needs
-`PHONE_HARNESS_API_KEY`, or the bridge running next to your own device.
+`PHONE_HARNESS_API_KEY`, or the bridge running next to your own device. The
+Android companion backend has its own four integration tests; the APK and a real
+phone run are still unverified because this machine has no Android SDK/JDK 17 and
+under 1 GB free.
 
 ## Attribution
 

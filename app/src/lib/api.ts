@@ -137,12 +137,48 @@ export interface Member {
   createdAt: string;
 }
 
+export type PhonePlatform = "android" | "ios" | "bridge";
+export type PhoneDeviceStatus = "active" | "paused" | "revoked";
+
 export interface PhoneStatus {
-  kind: "cloud" | "bridge";
+  kind: "cloud" | "bridge" | "companion";
   label: string;
   ready: boolean;
   detail: string;
   ops?: string[];
+}
+
+export interface PhoneDevice {
+  id: string;
+  name: string;
+  platform: PhonePlatform;
+  model: string | null;
+  osVersion: string | null;
+  appVersion: string | null;
+  status: PhoneDeviceStatus;
+  capabilities: Record<string, unknown>;
+  settings: Record<string, unknown>;
+  diagnostics: Record<string, unknown>;
+  lastSeenAt: string | null;
+  createdAt: string;
+  online: boolean;
+}
+
+export interface PhonePairing {
+  code: string;
+  expiresAt: string;
+  qr: string;
+  server: string;
+}
+
+export interface DevicesResponse {
+  configured: boolean;
+  devices: PhoneDevice[];
+  ops: string[];
+  protocol: string;
+  minApp: string;
+  legacy: PhoneStatus | null;
+  hint?: string;
 }
 
 export interface Connector {
@@ -249,10 +285,39 @@ export const api = {
   activity: () => request<{ events: AuditEntry[] }>("/api/activity"),
   team: () => request<{ members: Member[] }>("/api/team"),
 
-  devices: () =>
-    request<{ configured: boolean; devices: PhoneStatus[]; ops: string[]; hint?: string }>(
-      "/api/devices",
+  devices: () => request<DevicesResponse>("/api/devices"),
+  startPhonePairing: (input: { platform: PhonePlatform; name: string }) =>
+    request<PhonePairing>("/api/phone/pair/start", {
+      method: "POST",
+      body: body(input),
+    }),
+  pauseDevice: (id: string) =>
+    request<{ device: PhoneDevice; cancelled: number }>(
+      `/api/devices/${encodeURIComponent(id)}/pause`,
+      { method: "POST" },
     ),
+  resumeDevice: (id: string) =>
+    request<{ device: PhoneDevice }>(`/api/devices/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+    }),
+  revokeDevice: (id: string) =>
+    request<{ ok: true; cancelled: number }>(`/api/devices/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  deviceDiagnostics: (id: string) =>
+    request<{
+      device: PhoneDevice;
+      diagnostics: Record<string, unknown>;
+      capabilities: Record<string, unknown>;
+      settings: Record<string, unknown>;
+    }>(`/api/devices/${encodeURIComponent(id)}/diagnostics`),
+  deviceFrameUrl: (id: string, nonce = Date.now()) =>
+    `/api/devices/${encodeURIComponent(id)}/frame?t=${nonce}`,
+  companionOp: (id: string, op: "observe" | "apps" | "status", args: Record<string, unknown> = {}) =>
+    request<{ result: unknown }>(`/api/devices/${encodeURIComponent(id)}/op`, {
+      method: "POST",
+      body: body({ op, args }),
+    }),
   deviceOp: (op: string, kw: Record<string, unknown> = {}) =>
     request<{ png_b64?: string | null; bounds?: unknown; result?: unknown }>("/api/devices/op", {
       method: "POST",

@@ -47,7 +47,15 @@ import { GoogleCalendar, type GoogleTokens } from "../connectors/google.js";
 import { signState, verifyState } from "../connectors/oauth-state.js";
 import { calendarTools } from "../connectors/calendar-tools.js";
 import { createPhone, isPhoneOp, PHONE_OPS } from "../connectors/phone.js";
+import { companionFor } from "../connectors/companion-phone.js";
 import { phoneTools } from "../connectors/phone-tools.js";
+import { PhoneService, publicDevice } from "../phone/service.js";
+import {
+  MAX_FRAME_BYTES,
+  MIN_APP_VERSION,
+  PROTOCOL_VERSION,
+  isCompanionOp,
+} from "../phone/protocol.js";
 import type { ModelRouter } from "../intelligence/router.js";
 import { Agent, type AgentTool } from "../intelligence/agent.js";
 import type { ChatMessage } from "../intelligence/types.js";
@@ -151,6 +159,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       clientSecret: deps.config.googleClientSecret,
     });
   const phone = createPhone(deps.config);
+  const phoneService = new PhoneService(deps.database, deps.config.publicUrl);
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -185,6 +194,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
     "/api/internal/migrate",
     // OAuth redirect from Google: authenticated by the signed state, not a cookie.
     "/api/connectors/google/callback",
+    // Phone pairing and the device work loop authenticate with the pairing code
+    // or the device token instead of a browser session.
+    "/api/phone/pair/claim",
+    "/api/phone/agent/poll",
+    "/api/phone/agent/result",
+    "/api/phone/agent/frame",
+    "/api/phone/agent/heartbeat",
+    "/api/phone/agent/version",
   ]);
 
   app.use("/api/*", async (c, next) => {
@@ -326,17 +343,257 @@ export function createApp(deps: AppDeps): Hono<Env> {
   /* ---------------------------------------------------------------- devices */
 
   app.get("/api/devices", async (c) => {
-    requireUser(c);
-    if (!phone) {
-      return c.json({
-        configured: false,
-        devices: [],
-        ops: PHONE_OPS,
-        hint: "Set PHONE_HARNESS_API_KEY, or PHONE_BRIDGE_URL and PHONE_BRIDGE_TOKEN.",
-      });
+    const { user } = requireUser(c);
+    const devices = await phoneService.list(user.orgId, user.id);
+    const legacy = phone ? await phone.status() : null;
+    return c.json({
+      configured: devices.length > 0 || Boolean(phone),
+      devices: devices.map(publicDevice),
+      ops: PHONE_OPS,
+      protocol: PROTOCOL_VERSION,
+      minApp: MIN_APP_VERSION,
+      legacy,
+      hint:
+        devices.length > 0
+          ? "The companion polls outbound. No ports, no cloud phone."
+          : "Pair your Android phone in Devices to give the agent your real apps.",
+    });
+  });
+
+  app.get("/api/devices/:id", async (c) => {
+    const { user } = requireUser(c);
+    const device = await phoneService.get(user.orgId, user.id, param(c, "id"));
+    return c.json({ device: publicDevice(device) });
+  });
+
+  app.delete("/api/devices/:id", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const result = await phoneService.revoke(user.orgId, user.id, id);
+    await audit(deps, { user, expiresAt: "" }, "phone.revoke", "phone", id, {
+      cancelled: result.cancelled,
+    });
+    return c.json({ ok: true, cancelled: result.cancelled });
+  });
+
+  app.post("/api/devices/:id/pause", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const result = await phoneService.pause(user.orgId, user.id, id);
+    await audit(deps, { user, expiresAt: "" }, "phone.pause", "phone", id, {
+      cancelled: result.cancelled,
+    });
+    return c.json({ device: publicDevice(result.device), cancelled: result.cancelled });
+  });
+
+  app.post("/api/devices/:id/resume", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const device = await phoneService.resume(user.orgId, user.id, id);
+    await audit(deps, { user, expiresAt: "" }, "phone.resume", "phone", id);
+    return c.json({ device: publicDevice(device) });
+  });
+
+  app.post("/api/devices/:id/rotate", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const result = await phoneService.rotateToken(user.orgId, user.id, id);
+    await audit(deps, { user, expiresAt: "" }, "phone.rotate", "phone", id);
+    // The plaintext token is returned exactly once and never logged.
+    return c.json({ token: result.token, device: publicDevice(result.device) });
+  });
+
+  app.patch("/api/devices/:id/settings", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const body = z
+      .object({ settings: z.record(z.string(), z.unknown()) })
+      .parse(await c.req.json());
+    const device = await phoneService.updateSettings(user.orgId, user.id, id, body.settings);
+    await audit(deps, { user, expiresAt: "" }, "phone.settings", "phone", id, {
+      keys: Object.keys(body.settings),
+    });
+    return c.json({ device: publicDevice(device) });
+  });
+
+  app.get("/api/devices/:id/diagnostics", async (c) => {
+    const { user } = requireUser(c);
+    const device = await phoneService.get(user.orgId, user.id, param(c, "id"));
+    return c.json({
+      device: publicDevice(device),
+      diagnostics: device.diagnostics,
+      capabilities: device.capabilities,
+      settings: device.settings,
+    });
+  });
+
+  app.get("/api/devices/:id/frame", async (c) => {
+    const { user } = requireUser(c);
+    const frame = await phoneService.frame(user.orgId, user.id, param(c, "id"));
+    if (!frame) return c.body(null, 404);
+    return c.body(new Uint8Array(frame.jpeg), 200, {
+      "content-type": "image/jpeg",
+      "cache-control": "no-store",
+      "x-talisman-seq": frame.seq,
+      "x-talisman-captured-at": frame.capturedAt,
+    });
+  });
+
+  app.post("/api/devices/:id/op", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const body = z
+      .object({
+        op: z.string(),
+        args: z.record(z.string(), z.unknown()).default({}),
+      })
+      .parse(await c.req.json());
+    if (!isCompanionOp(body.op)) throw errors.invalid(`Unsupported phone op: ${body.op}`);
+    // The manual console is for diagnosis. Anything that can change an app must
+    // travel through a run with an approval; this endpoint cannot become a
+    // second, unaudited action path.
+    if (!["observe", "apps", "status"].includes(body.op)) {
+      throw errors.forbidden("Actions must come from an approved run");
     }
-    const status = await phone.status();
-    return c.json({ configured: true, devices: [status], ops: PHONE_OPS });
+    const device = await phoneService.get(user.orgId, user.id, id);
+    const result = await phoneService.execute(device, body.op, body.args, 45_000);
+    await audit(deps, { user, expiresAt: "" }, "phone.inspect", "phone", id, {
+      op: body.op,
+    });
+    return c.json({ result });
+  });
+
+  const authenticatedDevice = async (c: AppContext) => {
+    const device = await phoneService.authenticate(c.req.header("authorization"));
+    if (!device) throw errors.unauthorized("This phone is not paired or the token was revoked");
+    return device;
+  };
+
+  app.post("/api/phone/pair/start", async (c) => {
+    const session = requireUser(c);
+    const body = z
+      .object({
+        platform: z.enum(["android", "ios", "bridge"]).default("android"),
+        name: z.string().trim().min(1).max(80),
+      })
+      .parse(await c.req.json());
+    const pairing = await phoneService.startPairing(session.user.orgId, session.user.id, body);
+    await audit(deps, session, "phone.pair.start", "phone", "", {
+      platform: body.platform,
+      name: body.name,
+    });
+    return c.json(pairing, 201);
+  });
+
+  app.post("/api/phone/pair/claim", async (c) => {
+    const body = z
+      .object({
+        code: z.string().min(1).max(32),
+        platform: z.enum(["android", "ios", "bridge"]),
+        model: z.string().max(80).optional(),
+        os_version: z.string().max(40).optional(),
+        app_version: z.string().max(40).optional(),
+        capabilities: z.record(z.string(), z.unknown()).optional(),
+      })
+      .parse(await c.req.json());
+    const claimed = await phoneService.claimPairing({
+      code: body.code,
+      platform: body.platform,
+      model: body.model,
+      osVersion: body.os_version,
+      appVersion: body.app_version,
+      capabilities: body.capabilities,
+    });
+    return c.json(claimed, 201);
+  });
+
+  app.get("/api/phone/agent/version", (c) =>
+    c.json({ protocol: PROTOCOL_VERSION, min_app: MIN_APP_VERSION }),
+  );
+
+  app.post("/api/phone/agent/poll", async (c) => {
+    const device = await authenticatedDevice(c);
+    const command = await phoneService.poll(device, 20_000, c.req.raw.signal);
+    if (!command) return c.body(null, 204);
+    return c.json({
+      command: {
+        id: command.id,
+        op: command.op,
+        args: command.args,
+        run_id: command.runId,
+        step_id: command.stepId,
+        approval_id: command.approvalId,
+        args_hash: command.argsHash,
+        expires_at: command.expiresAt,
+      },
+    });
+  });
+
+  app.post("/api/phone/agent/result", async (c) => {
+    const device = await authenticatedDevice(c);
+    const body = z
+      .object({
+        command_id: z.string().min(1).max(64),
+        status: z.enum(["done", "error"]),
+        result: z.unknown().optional(),
+        error: z.string().max(200).optional(),
+        duration_ms: z.number().int().min(0).max(600_000).optional(),
+      })
+      .refine((value) => value.status !== "error" || Boolean(value.error), {
+        message: "error is required when status is error",
+        path: ["error"],
+      })
+      .parse(await c.req.json());
+    if (body.status === "done" && body.result === undefined) {
+      throw errors.invalid("result is required when status is done");
+    }
+    const outcome = await phoneService.complete(device, {
+      commandId: body.command_id,
+      status: body.status,
+      result: body.result ?? null,
+      error: body.error ?? null,
+      durationMs: body.duration_ms ?? null,
+    });
+    return c.json({ ok: true, ...outcome });
+  });
+
+  app.post("/api/phone/agent/frame", async (c) => {
+    const device = await authenticatedDevice(c);
+    if (c.req.header("content-type")?.split(";")[0]?.trim() !== "image/jpeg") {
+      throw errors.invalid("Frames must be image/jpeg");
+    }
+    const declared = Number(c.req.header("content-length") ?? 0);
+    if (declared > MAX_FRAME_BYTES) throw errors.invalid("Frame is larger than 300 KB");
+    const bytes = new Uint8Array(await c.req.arrayBuffer());
+    if (bytes.byteLength === 0) throw errors.invalid("Empty frame");
+    if (bytes.byteLength > MAX_FRAME_BYTES) throw errors.invalid("Frame is larger than 300 KB");
+    const seq = Number(c.req.header("x-talisman-seq") ?? 0);
+    if (!Number.isSafeInteger(seq) || seq < 0) throw errors.invalid("X-Talisman-Seq must be a positive integer");
+    await phoneService.putFrame(device, {
+      seq,
+      jpeg: bytes,
+      width: Number(c.req.header("x-talisman-width") ?? 0) || null,
+      height: Number(c.req.header("x-talisman-height") ?? 0) || null,
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/api/phone/agent/heartbeat", async (c) => {
+    const device = await authenticatedDevice(c);
+    const body = z
+      .object({
+        battery: z.number().min(0).max(1).optional(),
+        charging: z.boolean().optional(),
+        screen: z.enum(["on", "off"]).optional(),
+        a11y: z.boolean().optional(),
+        locked: z.boolean().optional(),
+        warnings: z.array(z.string().max(200)).max(20).optional(),
+        network: z.string().max(40).optional(),
+        app_version: z.string().max(40).optional(),
+      })
+      .parse(await c.req.json().catch(() => ({})));
+    const updated = await phoneService.heartbeat(device, body);
+    return c.json({ ok: true, status: updated.status });
   });
 
   app.post("/api/devices/op", async (c) => {
@@ -437,6 +694,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
       budgetTokens: 24_000,
     });
 
+    const companionDevice = await phoneService
+      .activeDevice(user.orgId, user.id)
+      .catch(() => null);
+    const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
     const tools: AgentTool[] = [
       {
         definition: {
@@ -516,7 +777,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         orgId: user.orgId,
         userId: user.id,
       }),
-      ...phoneTools({ phone }),
+      ...phoneTools({ phone: chatPhone }),
     ];
 
     const agent = new Agent(deps.models, tools);

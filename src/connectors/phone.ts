@@ -35,7 +35,7 @@ export const PHONE_OPS = [
 export type PhoneOp = (typeof PHONE_OPS)[number];
 
 export interface PhoneStatus {
-  kind: "cloud" | "bridge";
+  kind: "cloud" | "bridge" | "companion";
   label: string;
   ready: boolean;
   detail: string;
@@ -44,11 +44,13 @@ export interface PhoneStatus {
 
 export interface PhoneShot {
   pngBase64: string;
+  /** Companion screenshots are JPEG; the field name is kept for compatibility. */
+  mime?: string;
   bounds?: unknown;
 }
 
 export interface PhoneTransport {
-  readonly kind: "cloud" | "bridge";
+  readonly kind: "cloud" | "bridge" | "companion";
   readonly label: string;
   status(): Promise<PhoneStatus>;
   send(op: PhoneOp, kw?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;

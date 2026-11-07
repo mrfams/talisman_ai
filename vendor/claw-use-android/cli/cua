@@ -1,0 +1,967 @@
+#!/usr/bin/env bash
+# cua — Claw Use CLI
+# Control Android phones via Claw Use HTTP API
+# Usage: cua <command> [args...]
+
+set -euo pipefail
+
+# Config: env vars or ~/.config/claw-use/config
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/claw-use"
+CONFIG_FILE="$CONFIG_DIR/config"
+DEVICES_FILE="$CONFIG_DIR/devices"
+
+# Load config (default device)
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+fi
+
+CU_HOST="${CU_HOST:-}"
+CU_TOKEN="${CU_TOKEN:-}"
+CU_TIMEOUT="${CU_TIMEOUT:-10}"
+CU_DEVICE="${CU_DEVICE:-}"
+
+# If a device alias is set, load from devices file
+_load_device() {
+  local name="$1"
+  if [ -f "$DEVICES_FILE" ]; then
+    local line=$(grep "^${name}|" "$DEVICES_FILE" 2>/dev/null | head -1)
+    if [ -n "$line" ]; then
+      CU_HOST=$(echo "$line" | cut -d'|' -f2)
+      CU_TOKEN=$(echo "$line" | cut -d'|' -f3)
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Resolve device: env CU_DEVICE > --device flag > default config
+_resolve_device() {
+  if [ -n "$CU_DEVICE" ]; then
+    _load_device "$CU_DEVICE" || _err "Unknown device: $CU_DEVICE. Run 'cua devices' to list."
+  fi
+}
+
+# Colors
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+_err() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
+_ok() { echo -e "${GREEN}$*${NC}"; }
+
+_require_config() {
+  _resolve_device
+  [ -n "$CU_HOST" ] || _err "CU_HOST not set. Run: cua add <name> <ip> <token>"
+  [ -n "$CU_TOKEN" ] || _err "CU_TOKEN not set. Run: cua add <name> <ip> <token>"
+}
+
+_api() {
+  local method="$1" path="$2"; shift 2
+  local url="http://${CU_HOST}:7333${path}"
+  local auth_args=()
+  if [ "$path" != "/ping" ]; then
+    auth_args=(-H "X-Bridge-Token:${CU_TOKEN}")
+  fi
+  curl -s --connect-timeout 5 -m "$CU_TIMEOUT" -X "$method" "${auth_args[@]}" "$@" "$url" 2>&1
+}
+
+_api_json() {
+  _api "$@" -H "Content-Type: application/json"
+}
+
+_jq_or_raw() {
+  if [ -t 1 ] && command -v jq &>/dev/null; then
+    jq -C '.' 2>/dev/null || cat
+  elif command -v jq &>/dev/null; then
+    jq '.' 2>/dev/null || cat
+  else
+    cat
+  fi
+}
+
+cmd_setup() {
+  # Legacy: cua setup <ip> <token> → saves as default
+  local host="${1:-}" token="${2:-}"
+  [ -n "$host" ] && [ -n "$token" ] || _err "Usage: cua setup <ip> <token>  (or use: cua add <name> <ip> <token>)"
+  mkdir -p "$CONFIG_DIR"
+  cat > "$CONFIG_FILE" <<EOF
+CU_HOST="$host"
+CU_TOKEN="$token"
+EOF
+  chmod 600 "$CONFIG_FILE"
+  CU_HOST="$host" CU_TOKEN="$token"
+  local result=$(_api GET /ping)
+  if echo "$result" | grep -q '"ok"'; then
+    local version=$(echo "$result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    _ok "Connected to Claw Use $version at $host (default device)"
+  else
+    echo -e "${YELLOW}warning:${NC} saved but ping failed: $result"
+  fi
+}
+
+cmd_add() {
+  local name="${1:-}" host="${2:-}" token="${3:-}"
+  [ -n "$name" ] && [ -n "$host" ] && [ -n "$token" ] || _err "Usage: cua add <name> <ip> <token>"
+  mkdir -p "$CONFIG_DIR"
+  touch "$DEVICES_FILE"
+  chmod 600 "$DEVICES_FILE"
+  # Remove existing entry with same name
+  sed -i "/^${name}|/d" "$DEVICES_FILE"
+  echo "${name}|${host}|${token}" >> "$DEVICES_FILE"
+  
+  # Test connection
+  CU_HOST="$host" CU_TOKEN="$token"
+  local result=$(_api GET /ping)
+  if echo "$result" | grep -q '"ok"'; then
+    local version=$(echo "$result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    _ok "Added '$name' → $host (Claw Use $version)"
+  else
+    _ok "Added '$name' → $host"
+    echo -e "${YELLOW}warning:${NC} ping failed: $result"
+  fi
+  
+  # Set as default if it's the first/only device
+  local count=$(wc -l < "$DEVICES_FILE")
+  if [ "$count" -eq 1 ] || [ ! -f "$CONFIG_FILE" ]; then
+    cmd_use "$name"
+  fi
+}
+
+cmd_devices() {
+  if [ ! -f "$DEVICES_FILE" ] || [ ! -s "$DEVICES_FILE" ]; then
+    echo "No devices configured. Run: cua add <name> <ip> <token>"
+    return
+  fi
+  
+  # Get current default
+  local current_host="${CU_HOST:-}"
+  
+  echo -e "${CYAN}DEVICES${NC}"
+  while IFS='|' read -r name host token; do
+    local marker="  "
+    if [ "$host" = "$current_host" ]; then marker="${GREEN}▸ ${NC}"; fi
+    
+    # Quick ping (1s timeout)
+    local status="${RED}offline${NC}"
+    local ping_result=$(curl -s --connect-timeout 1 -m 2 "http://${host}:7333/ping" 2>&1)
+    if echo "$ping_result" | grep -q '"ok"'; then
+      local ver=$(echo "$ping_result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+      status="${GREEN}online${NC} v${ver}"
+    fi
+    
+    echo -e "${marker}${name}\t${host}\t${status}"
+  done < "$DEVICES_FILE"
+}
+
+cmd_use() {
+  local name="${1:-}"
+  [ -n "$name" ] || _err "Usage: cua use <device-name>"
+  
+  if ! _load_device "$name"; then
+    _err "Unknown device: $name. Run 'cua devices' to list."
+  fi
+  
+  mkdir -p "$CONFIG_DIR"
+  cat > "$CONFIG_FILE" <<EOF
+CU_HOST="$CU_HOST"
+CU_TOKEN="$CU_TOKEN"
+EOF
+  chmod 600 "$CONFIG_FILE"
+  _ok "Default device: $name ($CU_HOST)"
+}
+
+cmd_rm() {
+  local name="${1:-}"
+  [ -n "$name" ] || _err "Usage: cua rm <device-name>"
+  if [ -f "$DEVICES_FILE" ]; then
+    sed -i "/^${name}|/d" "$DEVICES_FILE"
+    _ok "Removed '$name'"
+  else
+    _err "No devices configured"
+  fi
+}
+
+cmd_discover() {
+  local target_subnet="${1:-}"
+  echo -e "${CYAN}Scanning for Claw Use devices...${NC}"
+  
+  local subnets=()
+  if [ -n "$target_subnet" ]; then
+    subnets+=("$target_subnet")
+  else
+    # Default: scan 192.168.x subnets (where phones live)
+    # Check which 192.168.x.x subnets we can reach
+    while IFS= read -r ip; do
+      local subnet=$(echo "$ip" | sed 's/\.[0-9]*$//')
+      local dup=0
+      for s in "${subnets[@]:-}"; do [ "$s" = "$subnet" ] && dup=1; done
+      [ "$dup" -eq 0 ] && subnets+=("$subnet")
+    done < <(ip -4 addr show | grep -oP 'inet \K192\.168\.[0-9.]+')
+    
+    # If no 192.168.x interface, scan common ones
+    if [ ${#subnets[@]} -eq 0 ]; then
+      subnets=("192.168.0" "192.168.1")
+    fi
+  fi
+  
+  for subnet in "${subnets[@]}"; do
+    echo "Scanning ${subnet}.0/24 ..."
+    for i in $(seq 1 254); do
+      (
+        local ip="${subnet}.${i}"
+        local result=$(curl -s --connect-timeout 1 -m 2 "http://${ip}:7333/ping" 2>/dev/null)
+        if echo "$result" | grep -q '"claw-use-android"' 2>/dev/null; then
+          local ver=$(echo "$result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+          echo -e "  ${GREEN}found${NC}  ${ip}:7333  v${ver}"
+        fi
+      ) &
+    done
+    wait
+  done
+  
+  echo ""
+  echo "To add: cua add <name> <ip> <token>"
+}
+
+cmd_ping() {
+  _api GET /ping | _jq_or_raw
+}
+
+cmd_info() {
+  _require_config
+  _api GET /info | _jq_or_raw
+}
+
+cmd_status() {
+  _require_config
+  _api GET /status | _jq_or_raw
+}
+
+cmd_screen() {
+  _require_config
+  local params=()
+  local prev=""
+  for arg in "$@"; do
+    case "$arg" in
+      -c|--compact) params+=("compact=true") ;;
+      -t|--timeout) ;;
+      *)
+        if [[ "$prev" == "-t" || "$prev" == "--timeout" ]]; then
+          params+=("timeout=$arg")
+        fi
+        ;;
+    esac
+    prev="$arg"
+  done
+  local qs=""
+  if [ ${#params[@]} -gt 0 ]; then
+    qs="?$(IFS='&'; echo "${params[*]}")"
+  fi
+  _api GET "/screen${qs}" | _jq_or_raw
+}
+
+cmd_screenshot() {
+  _require_config
+  local quality="${1:-50}" maxWidth="${2:-720}" output="${3:-}"
+  local result=$(_api GET "/screenshot?quality=$quality&maxWidth=$maxWidth")
+  
+  if echo "$result" | grep -q '"error"'; then
+    echo "$result" | _jq_or_raw
+    return 1
+  fi
+  
+  local size=$(echo "$result" | grep -o '"sizeBytes":[0-9]*' | cut -d: -f2)
+  
+  if [ -n "$output" ]; then
+    echo "$result" | python3 -c "
+import sys,json,base64
+d=json.load(sys.stdin)
+with open('$output','wb') as f: f.write(base64.b64decode(d['screenshot']))
+" && _ok "Saved ${size}B → $output"
+  else
+    # Save to temp
+    local tmp="/tmp/cu-screenshot-$(date +%s).jpg"
+    echo "$result" | python3 -c "
+import sys,json,base64
+d=json.load(sys.stdin)
+with open('$tmp','wb') as f: f.write(base64.b64decode(d['screenshot']))
+"
+    _ok "${size}B → $tmp"
+    echo "$tmp"
+  fi
+}
+
+cmd_snapshot() {
+  _require_config
+  local quality="${1:-50}" maxWidth="${2:-720}" output="${3:-}"
+  local result=$(_api GET "/snapshot?quality=$quality&maxWidth=$maxWidth")
+
+  if echo "$result" | grep -q '"error"'; then
+    echo "$result" | _jq_or_raw
+    return 1
+  fi
+
+  local size=$(echo "$result" | grep -o '"sizeBytes":[0-9]*' | cut -d: -f2)
+
+  if [ -n "$output" ]; then
+    echo "$result" | python3 -c "
+import sys,json,base64
+d=json.load(sys.stdin)
+with open('$output','wb') as f: f.write(base64.b64decode(d['screenshot']))
+" && _ok "Saved ${size}B → $output"
+  else
+    local tmp="/tmp/cu-snapshot-$(date +%s).jpg"
+    echo "$result" | python3 -c "
+import sys,json,base64
+d=json.load(sys.stdin)
+with open('$tmp','wb') as f: f.write(base64.b64decode(d['screenshot']))
+"
+    _ok "${size}B → $tmp"
+    echo "$tmp"
+  fi
+}
+
+cmd_act() {
+  _require_config
+  local json_body="${1:-}"
+  [ -n "$json_body" ] || _err "Usage: cua act '<json>'
+Examples:
+  cua act '{\"click\": 3}'            # click ref 3
+  cua act '{\"click\": \"OK\"}'       # click by text
+  cua act '{\"click\": [1,2,3]}'      # click refs in sequence
+  cua act '{\"tap\": {\"x\":500,\"y\":500}}'
+  cua act '{\"type\": \"hello\"}'
+  cua act '{\"swipe\": \"up\"}'
+  cua act '{\"back\": true}'
+  cua act '{\"home\": true}'
+  cua act '{\"scroll\": \"down\"}'
+  cua act '{\"launch\": \"com.app\"}'
+  cua act '{\"longpress\": 5}'"
+  _api_json POST /act -d "$json_body" | _jq_or_raw
+}
+
+cmd_tap() {
+  _require_config
+  local x="${1:-}" y="${2:-}"
+  [ -n "$x" ] && [ -n "$y" ] || _err "Usage: cu tap <x> <y>"
+  _api_json POST /tap -d "{\"x\":$x,\"y\":$y}" | _jq_or_raw
+}
+
+cmd_click() {
+  _require_config
+  local text="$*"
+  [ -n "$text" ] || _err "Usage: cu click <text>"
+  _api_json POST /click -d "{\"text\":\"$text\"}" | _jq_or_raw
+}
+
+cmd_longpress() {
+  _require_config
+  local x="${1:-}" y="${2:-}"
+  [ -n "$x" ] && [ -n "$y" ] || _err "Usage: cu longpress <x> <y>"
+  _api_json POST /longpress -d "{\"x\":$x,\"y\":$y}" | _jq_or_raw
+}
+
+cmd_swipe() {
+  _require_config
+  local dir="${1:-up}"
+  _api_json POST /swipe -d "{\"direction\":\"$dir\"}" | _jq_or_raw
+}
+
+cmd_scroll() {
+  _require_config
+  local dir="${1:-down}"
+  _api_json POST /scroll -d "{\"direction\":\"$dir\"}" | _jq_or_raw
+}
+
+cmd_type() {
+  _require_config
+  local text="$*"
+  [ -n "$text" ] || _err "Usage: cu type <text>"
+  # JSON-escape the text
+  local escaped=$(python3 -c "import json; print(json.dumps('$text')[1:-1])" 2>/dev/null || echo "$text")
+  _api_json POST /type -d "{\"text\":\"$escaped\"}" | _jq_or_raw
+}
+
+cmd_back() { _require_config; _api_json POST /global -d '{"action":"back"}' | _jq_or_raw; }
+cmd_home() { _require_config; _api_json POST /global -d '{"action":"home"}' | _jq_or_raw; }
+cmd_recents() { _require_config; _api_json POST /global -d '{"action":"recents"}' | _jq_or_raw; }
+
+cmd_launch() {
+  _require_config
+  local pkg="${1:-}"
+  if [ -z "$pkg" ]; then
+    # List apps
+    _api GET /launch | _jq_or_raw
+  else
+    _api_json POST /launch -d "{\"package\":\"$pkg\"}" | _jq_or_raw
+  fi
+}
+
+cmd_tts() {
+  _require_config
+  local text="$*"
+  [ -n "$text" ] || _err "Usage: cu tts <text>"
+  CU_TIMEOUT=35 _api_json POST /tts -d "{\"text\":\"$text\"}" | _jq_or_raw
+}
+
+cmd_flow() {
+  _require_config
+  # Pass raw JSON body
+  local body="${1:-}"
+  [ -n "$body" ] || _err "Usage: cua flow '{\"steps\":[{\"wait\":\"text\",\"then\":\"tap\"}]}'"
+  CU_TIMEOUT=310 _api_json POST /flow -d "$body" | _jq_or_raw
+}
+
+cmd_intent() {
+  _require_config
+  # Pass raw JSON body
+  local body="${1:-}"
+  [ -n "$body" ] || _err "Usage: cu intent '{\"action\":\"...\",\"uri\":\"...\"}'"
+  _api_json POST /intent -d "$body" | _jq_or_raw
+}
+
+cmd_call() {
+  _require_config
+  local number="${1:-}"
+  [ -n "$number" ] || _err "Usage: cu call <phone-number>"
+  _api_json POST /intent -d "{\"action\":\"android.intent.action.CALL\",\"uri\":\"tel:$number\"}" | _jq_or_raw
+}
+
+cmd_open() {
+  _require_config
+  local url="${1:-}"
+  [ -n "$url" ] || _err "Usage: cu open <url>"
+  _api_json POST /intent -d "{\"action\":\"android.intent.action.VIEW\",\"uri\":\"$url\"}" | _jq_or_raw
+}
+
+cmd_notifications() {
+  _require_config
+  _api GET /notifications | _jq_or_raw
+}
+
+cmd_wake() { _require_config; _api_json POST /screen/wake | _jq_or_raw; }
+cmd_lock() { _require_config; _api_json POST /screen/lock | _jq_or_raw; }
+cmd_unlock() { _require_config; _api_json POST /screen/unlock | _jq_or_raw; }
+
+# ── New I/O commands (v1.7.0) ──
+
+cmd_clipboard() {
+  _require_config
+  local text="$*"
+  if [ -z "$text" ]; then
+    _api GET /clipboard | _jq_or_raw
+  else
+    _api_json POST /clipboard -d "{\"text\":\"$text\"}" | _jq_or_raw
+  fi
+}
+
+cmd_volume() {
+  _require_config
+  local arg1="${1:-}"
+  if [ -z "$arg1" ]; then
+    _api GET /volume | _jq_or_raw
+    return
+  fi
+  local stream="$arg1" arg2="${2:-}"
+  if [ -z "$arg2" ]; then
+    _err "Usage: cua volume [stream] [level|up|down|mute|unmute]"
+  fi
+  case "$arg2" in
+    up|down|mute|unmute) _api_json POST /volume -d "{\"stream\":\"$stream\",\"action\":\"$arg2\"}" | _jq_or_raw ;;
+    *) _api_json POST /volume -d "{\"stream\":\"$stream\",\"level\":$arg2}" | _jq_or_raw ;;
+  esac
+}
+
+cmd_battery() { _require_config; _api GET /battery | _jq_or_raw; }
+cmd_wifi() { _require_config; _api GET /wifi | _jq_or_raw; }
+cmd_location() { _require_config; CU_TIMEOUT=15 _api GET /location | _jq_or_raw; }
+
+cmd_vibrate() {
+  _require_config
+  local ms="${1:-200}"
+  _api_json POST /vibrate -d "{\"ms\":$ms}" | _jq_or_raw
+}
+
+cmd_camera() {
+  _require_config
+  local facing="${1:-back}" quality="${2:-80}" out="${3:-}"
+  local resp
+  resp=$(CU_TIMEOUT=35 _api_json POST /camera -d "{\"facing\":\"$facing\",\"quality\":$quality}")
+  if [ -n "$out" ]; then
+    echo "$resp" | jq -r '.image' | base64 -d > "$out" 2>/dev/null && echo "Saved to $out" || echo "$resp" | _jq_or_raw
+  else
+    echo "$resp" | _jq_or_raw
+  fi
+}
+
+cmd_contacts() {
+  _require_config
+  local search="${1:-}"
+  if [ -n "$search" ]; then
+    _api "GET" "/contacts?search=$search" | _jq_or_raw
+  else
+    _api GET /contacts | _jq_or_raw
+  fi
+}
+
+cmd_sms() {
+  _require_config
+  local sub="${1:-list}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    list) _api GET "/sms?limit=${1:-20}" | _jq_or_raw ;;
+    send)
+      local to="${1:-}" msg="${2:-}"
+      [ -n "$to" ] && [ -n "$msg" ] || _err "Usage: cua sms send <number> <message>"
+      _api_json POST /sms -d "{\"to\":\"$to\",\"message\":\"$msg\"}" | _jq_or_raw
+      ;;
+    *) _err "Usage: cua sms [list|send]" ;;
+  esac
+}
+
+cmd_file() {
+  _require_config
+  local sub="${1:-}"
+  shift 2>/dev/null || true
+  case "$sub" in
+    list) _api "GET" "/file/list?path=${1:-/sdcard}" | _jq_or_raw ;;
+    read) [ -n "${1:-}" ] || _err "Usage: cua file read <path>"; _api "GET" "/file?path=$1" | _jq_or_raw ;;
+    write)
+      local path="${1:-}" content="${2:-}"
+      [ -n "$path" ] && [ -n "$content" ] || _err "Usage: cua file write <path> <content>"
+      _api_json POST /file -d "{\"path\":\"$path\",\"content\":\"$content\"}" | _jq_or_raw
+      ;;
+    upload)
+      local src="${1:-}" dest="${2:-}"
+      [ -n "$src" ] && [ -n "$dest" ] || _err "Usage: cua file upload <local-file> <remote-path>"
+      [ -f "$src" ] || _err "File not found: $src"
+      _require_config
+      local url="http://${CU_HOST}:${CU_PORT:-7333}/file/upload?path=$(python3 -c "import urllib.parse;print(urllib.parse.quote('$dest'))")"
+      CU_TIMEOUT=120 curl -s -X POST "$url" \
+        -H "X-Bridge-Token: ${CU_TOKEN}" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@$src" | _jq_or_raw
+      ;;
+    delete) [ -n "${1:-}" ] || _err "Usage: cua file delete <path>"; _api "DELETE" "/file?path=$1" | _jq_or_raw ;;
+    *) _err "Usage: cua file [list|read|write|upload|delete] <path>" ;;
+  esac
+}
+
+cmd_update() {
+  _require_config
+  local apk="${1:-}"
+  [ -n "$apk" ] || _err "Usage: cua update <path-to-apk>"
+  [ -f "$apk" ] || _err "APK not found: $apk"
+
+  local size=$(stat -c%s "$apk" 2>/dev/null || stat -f%z "$apk" 2>/dev/null)
+  echo "Uploading APK ($size bytes)..."
+
+  # Upload via raw binary stream
+  local url="http://${CU_HOST}:${CU_PORT:-7333}/file/upload?path=$(python3 -c "import urllib.parse;print(urllib.parse.quote('/sdcard/Download/claw-update.apk'))")"
+  local result
+  result=$(CU_TIMEOUT=120 curl -s -X POST "$url" \
+    -H "X-Bridge-Token: ${CU_TOKEN}" \
+    -H "Content-Type: application/octet-stream" \
+    --data-binary "@$apk")
+  echo "$result" | _jq_or_raw
+
+  if echo "$result" | grep -q '"written":true'; then
+    echo "Triggering install..."
+    # Use MIUI file manager to open APK (most reliable on Xiaomi)
+    _api_json POST /intent -d '{"action":"android.intent.action.VIEW","uri":"content://com.android.fileexplorer.myprovider/sdcard/Download/claw-update.apk","type":"application/vnd.android.package-archive"}' 2>/dev/null | _jq_or_raw
+    # Fallback: open file manager at the download location
+    _api_json POST /launch -d '{"package":"com.android.fileexplorer"}' 2>/dev/null | _jq_or_raw
+    echo "APK uploaded to /sdcard/Download/claw-update.apk"
+    echo "Open file manager → Download → tap claw-update.apk to install"
+  else
+    echo "Upload failed"
+  fi
+}
+
+cmd_config() {
+  _require_config
+  local subcmd="${1:-get}"; shift 2>/dev/null || true
+  case "$subcmd" in
+    get) _api GET /config | _jq_or_raw ;;
+    set) _api_json POST /config -d "$1" | _jq_or_raw ;;
+    pin) 
+      [ -n "${1:-}" ] || _err "Usage: cua config pin <your-lockscreen-pin>
+  Tell the app your phone's lock screen PIN so it can unlock remotely.
+  This does NOT change your PIN — it just remembers it for auto-unlock."
+      _api_json POST /config -d "{\"pin\":\"$1\"}" | _jq_or_raw ;;
+    pattern)
+      [ -n "${1:-}" ] || _err "Usage: cua config pattern <digits>
+  Tell the app your lock screen pattern as a sequence of digits 1-9.
+  Grid:  1 2 3
+         4 5 6
+         7 8 9
+  Example: cua config pattern 256398  (draws 2→5→6→3→9→8)"
+      _api_json POST /config -d "{\"pattern\":\"$1\"}" | _jq_or_raw ;;
+    *) _err "Usage: cua config get|set|pin|pattern" ;;
+  esac
+}
+
+cmd_setup_perms() {
+  _require_config
+  echo "Opening app permissions for Claw Use..."
+  
+  # Open app details settings
+  _api_json POST /intent -d '{"action":"android.settings.APPLICATION_DETAILS_SETTINGS","uri":"package:com.clawuse.android"}' > /dev/null 2>&1
+  sleep 3
+  
+  # Try to click 权限管理
+  local R
+  R=$(_api_json POST /click -d '{"text":"权限管理","retry":3,"retryMs":2000}' 2>&1)
+  if ! echo "$R" | grep -q '"clicked":true'; then
+    echo "⚠️  Could not find '权限管理'. On tablets, navigate manually:"
+    echo "   Settings → 应用设置 → search 'Claw' → Claw Use → 权限管理"
+    return 1
+  fi
+  sleep 2
+  
+  local PERMS=("位置" "相机" "麦克风" "照片和视频" "音乐和音频" "短信" "电话" "联系人" "日历")
+  
+  for perm in "${PERMS[@]}"; do
+    printf "  %-12s " "$perm"
+    
+    R=$(_api_json POST /click -d "{\"text\":\"$perm\"}" 2>&1)
+    if ! echo "$R" | grep -q '"clicked":true'; then
+      echo "❌ not found"
+      continue
+    fi
+    sleep 3
+    
+    # Try allow options in priority order
+    local DONE=false
+    for opt in "始终允许" "仅在使用中允许" "允许"; do
+      R=$(_api_json POST /click -d "{\"text\":\"$opt\"}" 2>&1)
+      if echo "$R" | grep -q '"clicked":true'; then
+        echo "✅ $opt"
+        DONE=true
+        break
+      fi
+    done
+    
+    if [ "$DONE" = "false" ]; then
+      echo "⚠️  no allow option found"
+    fi
+    
+    # Must go back to permission list
+    _api_json POST /global -d '{"action":"back"}' > /dev/null 2>&1
+    sleep 2
+  done
+  
+  echo ""
+  echo "Done! Run 'cua info' to verify permissions."
+}
+
+cmd_onboard() {
+  local name="${1:-}"
+  echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}║  Claw Use — Device Onboarding        ║${NC}"
+  echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
+  echo ""
+
+  # Step 1: Discover or use provided args
+  local ip="${2:-}" token="${3:-}"
+  if [ -z "$ip" ]; then
+    echo -e "${CYAN}Step 1/5: Scanning for devices...${NC}"
+    local found=()
+    local subnets=()
+    while IFS= read -r myip; do
+      local subnet=$(echo "$myip" | sed 's/\.[0-9]*$//')
+      local dup=0
+      for s in "${subnets[@]:-}"; do [ "$s" = "$subnet" ] && dup=1; done
+      [ "$dup" -eq 0 ] && subnets+=("$subnet")
+    done < <(ip -4 addr show | grep -oP 'inet \K192\.168\.[0-9.]+')
+    [ ${#subnets[@]} -eq 0 ] && subnets=("192.168.0" "192.168.1")
+
+    for subnet in "${subnets[@]}"; do
+      for i in $(seq 1 254); do
+        (
+          local dip="${subnet}.${i}"
+          local result=$(curl -s --connect-timeout 1 -m 2 "http://${dip}:7333/ping" 2>/dev/null)
+          if echo "$result" | grep -q '"claw-use-android"' 2>/dev/null; then
+            local ver=$(echo "$result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+            echo "FOUND:${dip}:v${ver}"
+          fi
+        ) &
+      done
+      wait
+    done | while IFS=: read -r tag dip ver; do
+      echo -e "  ${GREEN}Found${NC} $dip ($ver)"
+    done
+
+    echo ""
+    echo "Enter device IP:"
+    read -r ip
+    [ -z "$ip" ] && _err "No IP provided."
+  fi
+
+  if [ -z "$token" ]; then
+    echo "Enter auth token (from app notification or screen):"
+    read -r token
+    [ -z "$token" ] && _err "No token provided."
+  fi
+
+  if [ -z "$name" ]; then
+    echo "Enter device alias (e.g. redmi, tablet, pixel):"
+    read -r name
+    [ -z "$name" ] && _err "No name provided."
+  fi
+
+  # Step 2: Register
+  echo ""
+  echo -e "${CYAN}Step 2/5: Registering device '$name' at $ip...${NC}"
+  mkdir -p "$CONFIG_DIR"
+  # Remove old entry if exists
+  if [ -f "$DEVICES_FILE" ]; then
+    sed -i "/^${name}|/d" "$DEVICES_FILE"
+  fi
+  echo "${name}|${ip}:7333|${token}" >> "$DEVICES_FILE"
+
+  CU_HOST="${ip}:7333"
+  CU_TOKEN="$token"
+
+  local ping_result=$(_api GET /ping 2>&1 || true)
+  if echo "$ping_result" | grep -q '"ok"' 2>/dev/null; then
+    local ver=$(echo "$ping_result" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    echo -e "  ${GREEN}✅ Connected${NC} — v${ver}"
+  else
+    echo -e "  ${RED}❌ Connection failed${NC}"
+    echo "  Check: is the device on the same network? Is the app running?"
+    return 1
+  fi
+
+  # Step 3: Configure PIN
+  echo ""
+  echo -e "${CYAN}Step 3/5: Configure lock screen PIN${NC}"
+  echo "Enter device lock screen PIN (or press Enter to skip):"
+  read -r pin
+  if [ -n "$pin" ]; then
+    _api_json POST /config -d "{\"pin\":\"$pin\"}" > /dev/null 2>&1
+    echo "  PIN saved. Testing unlock..."
+    _api_json POST /screen/lock > /dev/null 2>&1
+    sleep 3
+    local unlock_result=$(_api_json POST /screen/unlock 2>&1 || true)
+    if echo "$unlock_result" | grep -q '"unlocked":true'; then
+      echo -e "  ${GREEN}✅ Auto-unlock works${NC}"
+    else
+      echo -e "  ${RED}⚠️  Unlock failed${NC} — verify PIN is correct"
+      echo "  You can retry later: cua -d $name config pin <correct-pin>"
+    fi
+  else
+    echo "  Skipped (auto-unlock disabled)"
+  fi
+
+  # Step 4: Permissions
+  echo ""
+  echo -e "${CYAN}Step 4/5: Setting up permissions...${NC}"
+  echo "  Attempting automated permission grants (MIUI)..."
+  # Run setup-perms inline
+  _api_json POST /intent -d '{"action":"android.settings.APPLICATION_DETAILS_SETTINGS","uri":"package:com.clawuse.android"}' > /dev/null 2>&1
+  sleep 3
+
+  local R
+  R=$(_api_json POST /click -d '{"text":"权限管理","retry":3,"retryMs":2000}' 2>&1)
+  if echo "$R" | grep -q '"clicked":true'; then
+    sleep 2
+    local PERMS=("位置" "相机" "麦克风" "照片和视频" "音乐和音频" "短信" "电话" "联系人" "日历")
+    local granted=0 total=${#PERMS[@]}
+    for perm in "${PERMS[@]}"; do
+      printf "  %-12s " "$perm"
+      R=$(_api_json POST /click -d "{\"text\":\"$perm\"}" 2>&1)
+      if ! echo "$R" | grep -q '"clicked":true'; then
+        echo "skip"
+        continue
+      fi
+      sleep 2
+      local DONE=false
+      for opt in "始终允许" "仅在使用中允许" "允许"; do
+        R=$(_api_json POST /click -d "{\"text\":\"$opt\"}" 2>&1)
+        if echo "$R" | grep -q '"clicked":true'; then
+          echo "✅ $opt"
+          DONE=true
+          granted=$((granted + 1))
+          break
+        fi
+      done
+      [ "$DONE" = "false" ] && echo "⚠️"
+      _api_json POST /global -d '{"action":"back"}' > /dev/null 2>&1
+      sleep 2
+    done
+    echo "  Granted: $granted/$total"
+  else
+    echo "  ⚠️  Could not navigate to permissions automatically."
+    echo "  Manual: Settings → Apps → Claw Use → Permissions → enable all"
+  fi
+
+  # Back to home
+  _api_json POST /global -d '{"action":"home"}' > /dev/null 2>&1
+
+  # Step 5: Verify
+  echo ""
+  echo -e "${CYAN}Step 5/5: Verification${NC}"
+  local info=$(_api GET /info 2>&1 || true)
+  local model=$(echo "$info" | grep -o '"model":"[^"]*"' | cut -d'"' -f4)
+  local android=$(echo "$info" | grep -o '"androidVersion":"[^"]*"' | cut -d'"' -f4)
+  local a11y=$(echo "$info" | grep -o '"accessibilityRunning":[a-z]*' | cut -d: -f2)
+  echo "  Model: $model"
+  echo "  Android: $android"
+  echo -n "  Accessibility: "
+  [ "$a11y" = "true" ] && echo -e "${GREEN}✅${NC}" || echo -e "${RED}❌${NC}"
+
+  echo -n "  A11y tree: "
+  local tree=$(_api GET "/screen?compact=true" 2>&1 || true)
+  local count=$(echo "$tree" | grep -o '"count":[0-9]*' | cut -d: -f2)
+  [ "${count:-0}" -gt 0 ] && echo -e "${GREEN}✅ $count nodes${NC}" || echo -e "${RED}❌ empty${NC}"
+
+  echo ""
+  echo -e "${GREEN}═══════════════════════════════════════${NC}"
+  echo -e "${GREEN}  Device '$name' is ready!${NC}"
+  echo -e "${GREEN}═══════════════════════════════════════${NC}"
+  echo ""
+  echo "  cua -d $name screen -c    # read UI"
+  echo "  cua -d $name screenshot   # take screenshot"
+  echo "  cua -d $name say 'hello'  # speak"
+}
+
+cmd_help() {
+  cat <<'EOF'
+cua — Claw Use Android CLI
+
+DEVICE MANAGEMENT
+  cua add <name> <ip> <token>  Add a device with alias
+  cua devices                  List all devices (with online status)
+  cua discover                 Scan local network for devices
+  cua onboard [name] [ip] [token]  Full setup: discover → register → PIN → perms → verify
+  cua setup-perms              Grant all MIUI app permissions
+  cua use <name>               Set default device
+  cua rm <name>                Remove a device
+  cua setup <ip> <token>       Quick setup (legacy, no alias)
+
+GLOBAL FLAGS
+  -d, --device <name>         Target a specific device for this command
+                              e.g. cua -d pixel screenshot
+
+PERCEPTION
+  cu ping                   Health check
+  cu info                   Device info
+  cu status                 Full health dashboard
+  cu screen [-c] [-t ms]    Read UI tree (semantic, with refs)
+  cu snapshot [q] [w] [f]   Screenshot via /snapshot endpoint
+  cua screenshot [q] [w] [f] Screenshot (legacy /screenshot)
+  cu notifications          List notifications
+
+ACTION (new unified /act endpoint)
+  cu act '<json>'           Unified action endpoint
+    {"click": 3}            Click by ref (from screen)
+    {"click": "OK"}         Click by text
+    {"click": [1,2,3]}      Click refs in sequence
+    {"tap": {"x":N,"y":N}}  Tap coordinates
+    {"type": "text"}        Type text
+    {"swipe": "up"}         Swipe direction
+    {"scroll": "down"}      Scroll direction
+    {"back": true}          Press back
+    {"home": true}          Press home
+    {"launch": "com.app"}   Launch app
+    {"longpress": 3}        Long press ref
+
+ACTION (legacy endpoints, still supported)
+  cu tap <x> <y>            Tap coordinates
+  cu click <text>           Tap element by text
+  cu longpress <x> <y>      Long press
+  cu swipe <up|down|l|r>    Swipe
+  cu scroll <up|down|l|r>   Scroll
+  cu type <text>            Type text
+  cu back                   Press back
+  cu home                   Press home
+  cu recents                Recent apps
+  cu launch [package]       List apps / launch app
+  cu open <url>             Open URL in browser
+  cu call <number>          Make a phone call
+  cu intent <json>          Fire raw Android Intent
+
+AUDIO
+  cu tts <text>             Speak through phone speaker
+
+DEVICE
+  cu wake                   Wake screen
+  cu lock                   Lock device
+  cu unlock                 Unlock (requires PIN configured)
+  cua config get|set|pin     Read/write device config
+
+ENV VARS
+  CU_HOST      Phone IP/hostname (overrides device config)
+  CU_TOKEN     Auth token (overrides device config)
+  CU_DEVICE    Device alias (same as -d flag)
+  CU_TIMEOUT   Request timeout in seconds (default: 10)
+
+EXAMPLES
+  cua add redmi 192.168.0.105 abc123     # add device
+  cua add pixel 100.80.1.5 def456        # add another
+  cua devices                             # list all
+  cua -d pixel screenshot                 # screenshot from pixel
+  cua use redmi                           # switch default
+  cua say "hello"                         # speak on default device
+EOF
+}
+
+# Parse global flags
+while [[ "${1:-}" == -* ]]; do
+  case "$1" in
+    -d|--device) CU_DEVICE="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+# Main dispatch
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  setup) cmd_setup "$@" ;;
+  add) cmd_add "$@" ;;
+  devices|ls) cmd_devices ;;
+  use) cmd_use "$@" ;;
+  rm|remove) cmd_rm "$@" ;;
+  discover|scan) cmd_discover ;;
+  ping) cmd_ping ;;
+  info) cmd_info ;;
+  status) cmd_status ;;
+  screen) cmd_screen "$@" ;;
+  snapshot) cmd_snapshot "$@" ;;
+  screenshot|ss) cmd_screenshot "$@" ;;
+  act) cmd_act "$@" ;;
+  tap) cmd_tap "$@" ;;
+  click) cmd_click "$@" ;;
+  longpress|lp) cmd_longpress "$@" ;;
+  swipe) cmd_swipe "$@" ;;
+  scroll) cmd_scroll "$@" ;;
+  type) cmd_type "$@" ;;
+  back) cmd_back ;;
+  home) cmd_home ;;
+  recents) cmd_recents ;;
+  launch) cmd_launch "$@" ;;
+  tts|say) cmd_tts "$@" ;;
+  flow) cmd_flow "$@" ;;
+  intent) cmd_intent "$@" ;;
+  call) cmd_call "$@" ;;
+  open) cmd_open "$@" ;;
+  notifications|notif) cmd_notifications ;;
+  wake) cmd_wake ;;
+  lock) cmd_lock ;;
+  unlock) cmd_unlock ;;
+  config) cmd_config "$@" ;;
+  update) cmd_update "$@" ;;
+  setup-perms) cmd_setup_perms ;;
+  onboard) cmd_onboard "$@" ;;
+  clipboard|clip) cmd_clipboard "$@" ;;
+  volume|vol) cmd_volume "$@" ;;
+  battery|bat) cmd_battery ;;
+  wifi) cmd_wifi ;;
+  location|loc) cmd_location ;;
+  vibrate|vib) cmd_vibrate "$@" ;;
+  camera|cam) cmd_camera "$@" ;;
+  contacts) cmd_contacts "$@" ;;
+  sms) cmd_sms "$@" ;;
+  file) cmd_file "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *) _err "Unknown command: $cmd. Run 'cua help' for usage." ;;
+esac
