@@ -321,7 +321,7 @@ public class ScreenHandler implements RouteHandler {
         String text, desc, nodeId;
         Rect bounds;
         int cx, cy, depth;
-        boolean clickable, editable, scrollable, checkable, checked;
+        boolean clickable, editable, scrollable, checkable, checked, password;
     }
 
     /** Public ref entry for /act resolution. */

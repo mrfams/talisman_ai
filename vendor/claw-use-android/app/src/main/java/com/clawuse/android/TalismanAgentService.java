@@ -22,6 +22,8 @@ import android.util.Base64;
 import android.util.Log;
 import android.view.accessibility.AccessibilityManager;
 
+import com.clawuse.android.auth.TokenManager;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 

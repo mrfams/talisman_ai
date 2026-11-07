@@ -1,5 +1,6 @@
 package com.clawuse.android;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -64,7 +65,12 @@ final class LocalBridge {
             int status = connection.getResponseCode();
             String text = read(status >= 400 ? connection.getErrorStream() : connection.getInputStream());
             if (text.isEmpty()) throw new AgentFailure("empty_response");
-            JSONObject result = new JSONObject(text);
+            JSONObject result;
+            try {
+                result = new JSONObject(text);
+            } catch (JSONException invalid) {
+                throw new AgentFailure("invalid_response");
+            }
             if (status < 200 || status >= 300) {
                 throw new AgentFailure(mapError(result.optString("error", "local_error")));
             }
