@@ -1,6 +1,7 @@
 package com.clawuse.android;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.security.MessageDigest;
@@ -47,7 +48,13 @@ final class CanonicalJson {
         }
         if (value instanceof String) return quote((String) value);
         if (value instanceof Boolean) return String.valueOf(value);
-        if (value instanceof Number) return JSONObject.numberToString((Number) value);
+        if (value instanceof Number) {
+            try {
+                return JSONObject.numberToString((Number) value);
+            } catch (JSONException invalid) {
+                throw new IllegalArgumentException("Invalid JSON number", invalid);
+            }
+        }
         return quote(String.valueOf(value));
     }
 
