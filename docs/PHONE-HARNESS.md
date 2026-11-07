@@ -1,5 +1,10 @@
 # Phone Harness: what we vendored and how Talisman will drive phones
 
+> For the phone-hosted architecture (the user's phone as the executor, no hosted handsets), read
+> [`PHONE-STRATEGY.md`](./PHONE-STRATEGY.md) and the wire contract in
+> [`PHONE-COMPANION-PROTOCOL.md`](./PHONE-COMPANION-PROTOCOL.md). This note covers the vendored
+> harness and the two transports that exist today.
+
 Vendored at `vendor/phone-harness`, MIT, pinned to `4bebff1` (2026-11-04).
 Source: https://github.com/phone-harness/phone-harness (YC F26).
 
