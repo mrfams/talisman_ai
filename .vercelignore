@@ -2,7 +2,9 @@ vendor
 .data
 docs
 tests
-scripts
+scripts/*
+# The production build applies the schema, so this one must ship.
+!scripts/migrate-deploy.mjs
 .env
 .env.*
 *.log

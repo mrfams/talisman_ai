@@ -11,7 +11,7 @@ application code that runs locally; only the drivers change.
 | --- | --- | --- |
 | HTTP | `@hono/node-server` listen | `api/index.ts` Node function, all `/api/*` rewritten to it |
 | Database | `DATABASE_URL`, or an embedded cluster for local dev | Managed Postgres (Neon) over TLS |
-| Schema | applied on start (`TALISMAN_AUTO_MIGRATE`) | applied by `POST /api/internal/migrate` with `CRON_SECRET` |
+| Schema | applied on start (`TALISMAN_AUTO_MIGRATE`) | applied by the production build, before the deployment takes traffic |
 | Task execution | `npm run worker`, a durable loop | one bounded slice per request (`POST /api/tasks/:id/run`), plus a daily cron drain |
 | Artifact bytes | filesystem under `DATA_DIR` | `artifact_blobs` table in Postgres |
 | Page reader | local Chrome via Playwright | HTTP reader with no JS engine, or a remote Chromium over CDP |
@@ -66,9 +66,18 @@ npx vercel env add DATABASE_URL production             # if not provided by Neon
 npx vercel deploy --prod
 ```
 
-Apply the schema once per environment:
+Production deploys apply `src/db/schema.sql` automatically, because
+`buildCommand` runs `scripts/migrate-deploy.mjs` before building the console.
+The migration is idempotent and runs while the previous deployment is still
+live, so a deploy that adds a table or column never reaches traffic before the
+database knows about it. Preview builds skip it: they have no database of their
+own and must not migrate production.
+
+To migrate another environment, or to repair one by hand:
 
 ```bash
+DATABASE_URL=... node scripts/migrate-deploy.mjs --force
+# or, on a running deployment:
 curl -X POST https://<deployment>/api/internal/migrate \
   -H "authorization: Bearer $CRON_SECRET"
 ```

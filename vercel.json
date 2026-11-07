@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "npm run build:app",
+  "buildCommand": "node scripts/migrate-deploy.mjs && npm run build:app",
   "outputDirectory": "app/dist",
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/index" },
