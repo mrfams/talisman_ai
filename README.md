@@ -49,15 +49,16 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
   companion, queue `observe`/`act`/`flow`/`apps`/`status` commands, inspect the
   latest JPEG frame, pause or revoke a device, and keep the old Phone Harness
   cloud/bridge transport as a compatibility adapter. See
-  [`docs/PHONE-COMPANION-PROTOCOL.md`](docs/PHONE-COMPANION-PROTOCOL.md).
+  [`docs/PHONE-COMPANION-PROTOCOL.md`](docs/PHONE-COMPANION-PROTOCOL.md). Download
+  the latest debug APK from [Releases](https://github.com/mrfams/talisman_ai/releases).
 - Unit/integration tests, a real-Chrome end-to-end test, a live deployment check,
   and CI.
 
 Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
 connectors, goals and monitors, semantic memory and AG-UI. The phone companion
-is not production-ready yet: its APK has not been compiled here, and phone
-actions still need approval-id binding plus a chat approval flow. See the
-protocol document for the exact boundary.
+is not production-ready yet: a debug APK builds in CI, but it has not been
+exercised on a real phone, and phone actions still need approval-id binding
+plus a chat approval flow. See the protocol document for the exact boundary.
 
 ## Two ways to run it
 
@@ -172,9 +173,9 @@ Google call needs your own OAuth client (`GOOGLE_CLIENT_ID` /
 `GOOGLE_CLIENT_SECRET`) and one consent click. Phone control is verified against
 a fake control service and a fake bridge; a real phone needs
 `PHONE_HARNESS_API_KEY`, or the bridge running next to your own device. The
-Android companion backend has its own four integration tests; the APK and a real
-phone run are still unverified because this machine has no Android SDK/JDK 17 and
-under 1 GB free.
+Android companion backend has its own four integration tests and its debug APK
+builds successfully in CI (release `companion-5-1`); a real phone run is still
+unverified. This machine itself has no Android SDK/JDK 17 and under 1 GB free.
 
 ## Attribution
 

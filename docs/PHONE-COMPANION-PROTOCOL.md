@@ -1,9 +1,10 @@
 # Phone companion protocol (v1)
 
 **Status:** the backend queue, pairing, frame storage, legacy transport adapter, and the Android
-companion source are implemented. The Android APK has **not** been compiled on this machine: there
-is no Android SDK or JDK 17, and the only volume had 797 MB free. Do not describe the APK or a real
-phone run as verified until that build and a live pairing test have both happened.
+companion source are implemented. A debug APK builds successfully in GitHub Actions (run
+`42419256753`, release `companion-5-1`) and the published asset was downloaded and hash-checked. It
+has **not** been installed or exercised on a real phone yet. Do not describe live pairing or
+AccessibilityService execution as verified until that test has happened.
 
 The phone is the host. Talisman is a mailbox and planner; it never opens an inbound port on the
 phone. The companion polls outbound, claims one command, executes it, and posts one result.
@@ -368,12 +369,14 @@ Verified on 7 November 2026:
 - `tests/phone-queue.test.ts`: 4/4 pass — single-use/tenant-scoped pairing and hashed tokens,
   atomic claim/idempotent result/tenant-scoped frames, pause/rotate/revoke, and expired-command plus
   canonical-hash checks;
+- GitHub Actions `Android companion APK` run `42419256753`: success; the APK is 4,462,075 bytes
+  with SHA-256 `95aa03f89254b77e1861beb7e40609dcafd342c4260ec5e9ba0e7f68a45fa382`, and the downloaded
+  release asset matches that digest;
 - `CanonicalJson` on Android has a matching Node test only for the Node implementation; a JVM/Node
   cross-check is still pending.
 
 Not verified:
 
-- Android compilation (no SDK/JDK) and therefore no APK;
 - a real phone pairing, AccessibilityService run, screenshot, or live model action;
 - chat approval UI and approval-id binding (see §6);
 - frame retention/redaction and per-IP pairing rate limiting (not implemented).
