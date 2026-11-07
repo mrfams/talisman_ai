@@ -18,6 +18,7 @@ import {
   Button,
   Card,
   Empty,
+  Markdown,
   Notice,
   Skeleton,
   StatusBadge,
@@ -54,6 +55,32 @@ function duration(step: TaskStep): string | null {
   return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
 }
 
+function elapsedLabel(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ${Math.round((ms % 60_000) / 1000)}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function FailureNotice({ text }: { text: string }) {
+  if (text.length <= 260) return <Notice tone="bad">{text}</Notice>;
+  return (
+    <Notice tone="bad">
+      <div>{text.slice(0, 260).trimEnd()}…</div>
+      <details style={{ marginTop: 4 }}>
+        <summary className="tiny" style={{ cursor: "pointer" }}>
+          Show full error
+        </summary>
+        <div className="mono tiny" style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>
+          {text}
+        </div>
+      </details>
+    </Notice>
+  );
+}
+
 function TimelineStep({ step }: { step: TaskStep }) {
   const retried = step.attempts > 1;
   const elapsed = duration(step);
@@ -86,7 +113,20 @@ function TimelineStep({ step }: { step: TaskStep }) {
               ? <span>started {timeAgo(step.startedAt)}</span>
               : null}
         </div>
-        {step.error ? <div className="tl-error">{step.error}</div> : null}
+        {step.error ? (
+          step.error.length > 220 ? (
+            <details className="tl-error-detail">
+              <summary>
+                Error · {step.error.slice(0, 110).trimEnd()}…
+              </summary>
+              <div className="tl-error" style={{ marginTop: 5 }}>
+                {step.error}
+              </div>
+            </details>
+          ) : (
+            <div className="tl-error">{step.error}</div>
+          )
+        ) : null}
         {hasDetail ? (
           <details className="tl-detail">
             <summary>Input and output</summary>
@@ -175,18 +215,20 @@ export function TaskDetail() {
 
   return (
     <div className="page">
-      <div>
-        <Link to="/tasks" className="row tiny muted" style={{ gap: 6 }}>
-          <ArrowLeft size={13} aria-hidden /> All runs
+      <div className="breadcrumb">
+        <Link to="/tasks" className="row" style={{ gap: 5 }}>
+          <ArrowLeft size={12} aria-hidden /> Runs
         </Link>
+        <span>/</span>
+        <span className="mono">{task.id.slice(0, 8)}</span>
       </div>
 
       <div className="page-head">
-        <div className="stack" style={{ gap: 8, maxWidth: 720 }}>
+        <div className="stack" style={{ gap: 7, maxWidth: 760 }}>
           <div className="row wrap" style={{ gap: 8 }}>
             <StatusBadge status={task.status} />
             <span className="tiny faint">
-              created {timeAgo(task.createdAt)} · attempts {task.attempts}/{task.maxAttempts}
+              {task.status === "running" ? "started" : "created"} {timeAgo(task.createdAt)}
             </span>
           </div>
           <h1 className="page-title">{task.title}</h1>
@@ -238,11 +280,46 @@ export function TaskDetail() {
         </div>
       </div>
 
-      <div className="bar">
-        <span style={{ width: `${Math.max(2, task.progress)}%` }} />
+      <div className="metric-strip">
+        <div className="metric">
+          <span className="metric-value">
+            {steps.filter((step) => ["succeeded", "skipped"].includes(step.status)).length}/{steps.length}
+          </span>
+          <span className="metric-label">Steps complete</span>
+        </div>
+        <div className="metric">
+          <span className="metric-value">
+            {elapsedLabel(
+              task.startedAt
+                ? (task.finishedAt ? new Date(task.finishedAt) : new Date()).getTime() -
+                    new Date(task.startedAt).getTime()
+                : null,
+            )}
+          </span>
+          <span className="metric-label">Elapsed</span>
+        </div>
+        <div className="metric">
+          <span className="metric-value">
+            {task.attempts}
+            <span className="faint" style={{ fontSize: "var(--text-sm)", fontWeight: 500 }}>
+              /{task.maxAttempts}
+            </span>
+          </span>
+          <span className="metric-label">Attempts</span>
+        </div>
+        <div className="metric">
+          <span className="metric-value">{artifacts.length}</span>
+          <span className="metric-label">Artifacts</span>
+        </div>
       </div>
 
-      {task.error ? <Notice tone="bad">{task.error}</Notice> : null}
+      {active ? (
+        <div className="bar" aria-label={`${task.progress} percent complete`}>
+          <span style={{ width: `${Math.max(2, task.progress)}%` }} />
+        </div>
+      ) : null}
+
+      {task.error ? <FailureNotice text={task.error} /> : null}
       {act.isError ? <Notice tone="bad">{errorMessage(act.error)}</Notice> : null}
 
       {pending.length ? (
@@ -260,17 +337,7 @@ export function TaskDetail() {
                   <div className="tiny faint">
                     {approval.kind.replace(/_/g, " ")} · asked {timeAgo(approval.createdAt)}
                   </div>
-                  <pre
-                    className="tiny"
-                    style={{
-                      marginTop: 8,
-                      padding: 10,
-                      background: "var(--code-bg)",
-                      borderRadius: 8,
-                      overflow: "auto",
-                      maxHeight: 180,
-                    }}
-                  >
+                  <pre className="approval-payload" style={{ marginTop: 8 }}>
                     {JSON.stringify(approval.payload ?? {}, null, 2)}
                   </pre>
                 </div>
@@ -295,6 +362,24 @@ export function TaskDetail() {
                 </div>
               </div>
             ))}
+          </div>
+        </Card>
+      ) : null}
+
+      {task.result !== null && task.result !== undefined ? (
+        <Card flush>
+          <div className="card-head">
+            <h2 className="section-title">Result</h2>
+            <span className="tiny faint">Written by the run</span>
+          </div>
+          <div className="card-body">
+            {typeof task.result === "string" ? (
+              <Markdown text={task.result} />
+            ) : (
+              <pre className="approval-payload" style={{ maxHeight: 320 }}>
+                {JSON.stringify(task.result, null, 2)}
+              </pre>
+            )}
           </div>
         </Card>
       ) : null}
@@ -390,7 +475,11 @@ export function TaskDetail() {
                 </span>
                 <div className="grow">
                   <div className="small">{event.title}</div>
-                  {event.detail ? <div className="tiny faint">{event.detail}</div> : null}
+                  {event.detail ? (
+                    <div className="tiny faint log-detail" title={event.detail}>
+                      {event.detail}
+                    </div>
+                  ) : null}
                 </div>
                 </div>
               ))}

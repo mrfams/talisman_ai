@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, MessageSquarePlus, Square, Wrench } from "lucide-react";
+import { ArrowRight, ArrowUp, Check, MessageSquarePlus, Square, Wrench } from "lucide-react";
 import { api, streamMessage, type StoredMessage } from "../lib/api";
 import { errorMessage, useConversations, useMessages } from "../lib/queries";
-import { Badge, Button, Empty, IconButton, Markdown, Notice, Skeleton, timeAgo } from "../ui";
+import { Button, Markdown, Notice, Skeleton, timeAgo } from "../ui";
+import { BrandMark } from "../BrandMark";
+
+const OPENERS = [
+  "Research a company and write a one-page brief",
+  "Plan my week from my calendar",
+  "Draft a reply to the last email I got",
+];
 
 function textOf(message: StoredMessage): string {
   if (typeof message.content === "string") return message.content;
@@ -31,6 +38,7 @@ export function Chat() {
   const abort = useRef<AbortController | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   const input = useRef<HTMLTextAreaElement | null>(null);
+  const autoStarted = useRef(false);
 
   const shown = messages.data ?? [];
   const activeTitle = conversations.data?.find((thread) => thread.id === id)?.title;
@@ -44,21 +52,30 @@ export function Chat() {
     input.current?.focus();
   }, [id]);
 
-  async function send() {
-    const text = draft.trim();
-    if (!text || sending) return;
+  // Arriving from Today with a job should start it, not make the person press Enter twice.
+  useEffect(() => {
+    const opener = params.get("q")?.trim();
+    if (!opener || id || autoStarted.current) return;
+    autoStarted.current = true;
+    void send(opener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function send(text = draft) {
+    const body = text.trim();
+    if (!body || sending) return;
 
     setSending(true);
     setProblem(null);
     setDraft("");
-    setPending(text);
+    setPending(body);
     setLiveText("");
     setTools([]);
 
     let conversationId = id;
     try {
       if (!conversationId) {
-        const created = await api.createConversation(text.slice(0, 60));
+        const created = await api.createConversation(body.slice(0, 60));
         conversationId = created.conversation.id;
         navigate(`/chat/${conversationId}`, { replace: true });
         await client.invalidateQueries({ queryKey: ["conversations"] });
@@ -68,7 +85,7 @@ export function Chat() {
       abort.current = controller;
       await streamMessage(
         conversationId,
-        text,
+        body,
         {
           onText: (chunk) => setLiveText((current) => current + chunk),
           onTool: (event) =>
@@ -99,6 +116,8 @@ export function Chat() {
     setSending(false);
   }
 
+  const empty = shown.length === 0 && !pending && !liveText;
+
   return (
     <div className="chat">
       <aside className="chat-side" aria-label="Threads">
@@ -111,14 +130,12 @@ export function Chat() {
         >
           New chat
         </Button>
-        <div className="rail-label" style={{ paddingTop: "var(--space-4)" }}>
-          Recent
-        </div>
+        <div className="rail-label">Recent</div>
         {conversations.isLoading ? (
-          <div className="stack">
-            <Skeleton h={14} />
-            <Skeleton h={14} w="80%" />
-            <Skeleton h={14} w="60%" />
+          <div className="stack" style={{ padding: "4px 8px" }}>
+            <Skeleton h={12} />
+            <Skeleton h={12} w="80%" />
+            <Skeleton h={12} w="60%" />
           </div>
         ) : conversations.data?.length ? (
           conversations.data.map((thread) => (
@@ -133,14 +150,14 @@ export function Chat() {
             </Link>
           ))
         ) : (
-          <p className="tiny muted" style={{ padding: "0 12px" }}>
+          <p className="tiny muted" style={{ padding: "2px 8px" }}>
             No threads yet. The first message starts one.
           </p>
         )}
       </aside>
 
       <section className="thread">
-        <header className="card-head" style={{ borderBottom: "1px solid var(--line)" }}>
+        <header className="thread-head">
           <select
             className="select thread-select"
             aria-label="Switch conversation"
@@ -157,55 +174,74 @@ export function Chat() {
             ))}
           </select>
           <div className="grow" style={{ minWidth: 0 }}>
-            <div className="small" style={{ fontWeight: 600 }}>
-              <span className="truncate" style={{ display: "block" }}>
-                {activeTitle ?? (id ? "Conversation" : "New chat")}
-              </span>
+            <div className="small truncate" style={{ fontWeight: 550 }}>
+              {activeTitle ?? (id ? "Conversation" : "New chat")}
             </div>
-            <span className="tiny faint">
+            <span className="tiny faint truncate">
               {sending ? "Working…" : "Replies stream as the agent works"}
             </span>
           </div>
           {sending ? (
-            <Button size="sm" variant="secondary" icon={<Square size={12} />} onClick={stop}>
+            <Button size="sm" variant="secondary" icon={<Square size={11} />} onClick={stop}>
               Stop
             </Button>
-          ) : null}
+          ) : (
+            <Link to="/chat" className="icon-btn" aria-label="Start a new chat" title="New chat">
+              <MessageSquarePlus size={15} />
+            </Link>
+          )}
         </header>
 
         <div className="thread-scroll" ref={scroller}>
           <div className="thread-inner">
-            {messages.isLoading ? (
+            {messages.isLoading && !pending ? (
               <div className="stack">
-                <Skeleton h={20} w="55%" />
-                <Skeleton h={80} />
+                <Skeleton h={18} w="55%" />
+                <Skeleton h={70} />
               </div>
-            ) : shown.length === 0 && !pending ? (
-              <Empty
-                icon={<MessageSquarePlus size={18} />}
-                title="Say what you need done"
-                body="Ask a question, or hand over a job. Anything multi-step becomes a durable run you can watch, pause, and approve."
-                action={
-                  <div className="row wrap">
-                    {["Research something for me", "Plan my day", "Draft a reply"].map((prompt) => (
-                      <button key={prompt} className="chip" onClick={() => setDraft(prompt)}>
-                        {prompt}
-                      </button>
-                    ))}
-                  </div>
-                }
-              />
+            ) : empty ? (
+              <div className="chat-empty">
+                <span className="chat-empty-mark">
+                  <BrandMark size={30} />
+                </span>
+                <h2 className="chat-empty-title">
+                  {id ? "Nothing in this thread yet" : "What should I get done?"}
+                </h2>
+                <p className="chat-empty-body">
+                  {id
+                    ? "Send the first message below, or start from one of these."
+                    : "Ask a question, or hand over a job. Anything multi-step becomes a durable run you can watch, pause, and approve."}
+                </p>
+                <div className="chat-openers">
+                  {OPENERS.map((opener) => (
+                    <button key={opener} className="chat-opener" onClick={() => void send(opener)}>
+                      <span className="grow">{opener}</span>
+                      <ArrowRight size={13} aria-hidden style={{ opacity: 0.5 }} />
+                    </button>
+                  ))}
+                </div>
+              </div>
             ) : (
               shown.map((message) => {
                 const text = textOf(message);
                 if (!text) return null;
+                if (message.role === "user") {
+                  return (
+                    <article key={message.id} className="msg msg-user">
+                      <div className="bubble">
+                        {text}
+                        <div className="msg-time">{timeAgo(message.createdAt)}</div>
+                      </div>
+                    </article>
+                  );
+                }
                 return (
-                  <article
-                    key={message.id}
-                    className={`msg ${message.role === "user" ? "msg-user" : "msg-assistant"}`}
-                  >
+                  <article key={message.id} className="msg msg-assistant">
+                    <span className="msg-avatar" aria-hidden>
+                      <BrandMark size={13} />
+                    </span>
                     <div className="bubble">
-                      {message.role === "user" ? text : <Markdown text={text} />}
+                      <Markdown text={text} />
                       <div className="msg-time">{timeAgo(message.createdAt)}</div>
                     </div>
                   </article>
@@ -220,14 +256,18 @@ export function Chat() {
             ) : null}
 
             {tools.length ? (
-              <div className="stack" style={{ gap: 6 }}>
+              <div className="stack" style={{ gap: 5, paddingLeft: 34 }}>
                 {tools.map((tool, index) => (
-                  <div key={`${tool.name}-${index}`} className="row tiny muted" style={{ gap: 8 }}>
-                    <Wrench size={12} aria-hidden />
-                    <span className="mono">{tool.name}</span>
-                    <Badge tone={tool.phase === "end" ? "ok" : "info"}>
-                      {tool.phase === "end" ? "done" : "running"}
-                    </Badge>
+                  <div key={`${tool.name}-${index}`} className="tool-line">
+                    {tool.phase === "end" ? (
+                      <Check size={12} aria-hidden style={{ color: "var(--ok)" }} />
+                    ) : (
+                      <span className="spinner" aria-hidden style={{ width: 10, height: 10 }} />
+                    )}
+                    <span>{tool.name.replace(/_/g, " ")}</span>
+                    <span style={{ opacity: 0.6 }}>
+                      {tool.phase === "end" ? "finished" : "running"}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -235,16 +275,18 @@ export function Chat() {
 
             {liveText ? (
               <article className="msg msg-assistant">
+                <span className="msg-avatar" aria-hidden>
+                  <BrandMark size={13} />
+                </span>
                 <div className="bubble">
                   <Markdown text={liveText} />
-                  <span className="badge" data-tone="live" style={{ marginTop: 8 }}>
-                    streaming
-                  </span>
+                  <span className="caret" aria-label="Still writing" />
                 </div>
               </article>
-            ) : sending ? (
-              <div className="row tiny muted" style={{ gap: 8 }}>
-                <span className="spinner" aria-hidden /> Thinking
+            ) : sending && !tools.length ? (
+              <div className="row tiny muted" style={{ gap: 8, paddingLeft: 34 }}>
+                <Wrench size={12} aria-hidden />
+                Thinking
               </div>
             ) : null}
 
@@ -269,21 +311,19 @@ export function Chat() {
               }}
               aria-label="Message"
             />
-            <IconButton
-              label={sending ? "Stop" : "Send"}
+            <button
+              className="composer-send"
+              aria-label={sending ? "Stop" : "Send"}
               disabled={!draft.trim() || sending}
               onClick={() => void send()}
-              style={{
-                background: draft.trim() && !sending ? "var(--accent)" : "transparent",
-                color: draft.trim() && !sending ? "var(--accent-ink)" : "var(--faint)",
-              }}
             >
-              <ArrowUp size={16} />
-            </IconButton>
+              <ArrowUp size={15} />
+            </button>
           </div>
-          <p className="tiny faint" style={{ textAlign: "center", marginTop: 8 }}>
-            Enter sends · Shift+Enter adds a line
-          </p>
+          <div className="composer-hint">
+            <span>Enter sends · Shift+Enter adds a line</span>
+            <span>{sending ? "Streaming reply" : "Talisman can browse and take actions"}</span>
+          </div>
         </div>
       </section>
     </div>

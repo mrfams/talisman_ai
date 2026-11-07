@@ -17,8 +17,8 @@ body {
   background: var(--canvas);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: var(--text-md);
-  line-height: 1.55;
+  font-size: var(--text-sm);
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-feature-settings: "ss01" 1, "cv01" 1;
@@ -45,8 +45,8 @@ h2,
 h3,
 h4 {
   font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 1.2;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
 }
 
 a {
@@ -155,41 +155,52 @@ hr {
 
 .page {
   width: 100%;
-  max-width: 1180px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: var(--space-7) var(--space-6) var(--space-10);
+  padding: var(--space-6) var(--space-6) var(--space-10);
   display: flex;
   flex-direction: column;
-  gap: var(--space-6);
+  gap: var(--space-5);
 }
 
 @media (max-width: 720px) {
   .page {
-    padding: var(--space-5) var(--space-4) var(--space-8);
-    gap: var(--space-5);
+    padding: var(--space-4) var(--space-4) var(--space-8);
+    gap: var(--space-4);
   }
 }
 
 .page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-4);
   flex-wrap: wrap;
+  padding-bottom: var(--space-1);
 }
 
 .page-title {
   font-size: var(--text-2xl);
-  letter-spacing: -0.03em;
+  font-weight: 600;
+  letter-spacing: -0.028em;
+  line-height: 1.15;
 }
 
 .page-sub {
   color: var(--muted);
   font-size: var(--text-sm);
+  line-height: 1.55;
   max-width: var(--measure);
 }
 
 .section-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text-soft);
+}
+
+.eyebrow {
   font-size: var(--text-2xs);
   font-weight: 600;
   letter-spacing: 0.12em;
@@ -197,10 +208,19 @@ hr {
   color: var(--faint);
 }
 
+.meta {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
 .mono {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   letter-spacing: -0.01em;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
 }
 
 .muted {
@@ -235,6 +255,12 @@ hr {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+.rule {
+  height: 1px;
+  background: var(--line);
+  width: 100%;
 }
 
 .dither {

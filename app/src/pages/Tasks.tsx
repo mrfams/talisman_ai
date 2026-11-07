@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Plus } from "lucide-react";
+import { ListChecks, Plus, Search } from "lucide-react";
 import { api } from "../lib/api";
 import { errorMessage, isActive, useTasks } from "../lib/queries";
 import {
@@ -31,12 +31,26 @@ export function Tasks() {
   const tasks = useTasks();
   const [params, setParams] = useSearchParams();
   const filter = (params.get("tab") as Filter | null) ?? "all";
-  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(params.get("new") === "1");
   const [goal, setGoal] = useState("");
   const [seeds, setSeeds] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const navigate = useNavigate();
   const client = useQueryClient();
+
+  useEffect(() => {
+    setOpen(params.get("new") === "1");
+  }, [params]);
+
+  function close() {
+    setOpen(false);
+    if (params.get("new")) {
+      const next = new URLSearchParams(params);
+      next.delete("new");
+      setParams(next, { replace: true });
+    }
+  }
 
   const create = useMutation({
     mutationFn: async () => {
@@ -47,7 +61,7 @@ export function Tasks() {
       return api.createTask({ goal: goal.trim(), ...(urls.length ? { seedUrls: urls } : {}) });
     },
     onSuccess: async ({ task }) => {
-      setOpen(false);
+      close();
       setGoal("");
       setSeeds("");
       await client.invalidateQueries({ queryKey: ["tasks"] });
@@ -56,13 +70,16 @@ export function Tasks() {
     onError: (error) => setProblem(errorMessage(error)),
   });
 
+  const needle = query.trim().toLowerCase();
   const all = tasks.data ?? [];
-  const rows = all.filter((task) => {
-    if (filter === "active") return isActive(task.status);
-    if (filter === "needs") return task.status === "waiting_approval";
-    if (filter === "done") return ["succeeded", "failed", "cancelled"].includes(task.status);
-    return true;
-  });
+  const rows = all
+    .filter((task) => {
+      if (filter === "active") return isActive(task.status);
+      if (filter === "needs") return task.status === "waiting_approval";
+      if (filter === "done") return ["succeeded", "failed", "cancelled"].includes(task.status);
+      return true;
+    })
+    .filter((task) => !needle || `${task.title} ${task.goal}`.toLowerCase().includes(needle));
 
   return (
     <div className="page">
@@ -73,29 +90,46 @@ export function Tasks() {
             Every job the agent has taken on, the step it is on, and what came out of it.
           </p>
         </div>
-        <Button variant="primary" icon={<Plus size={15} />} onClick={() => setOpen(true)}>
+        <Button variant="primary" icon={<Plus size={14} />} onClick={() => setOpen(true)}>
           New run
         </Button>
       </div>
 
-      <div className="row-between wrap">
-        <div className="tabs" role="tablist" aria-label="Filter runs">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              role="tab"
-              aria-selected={filter === tab.id}
-              className="tab"
-              onClick={() => {
-                if (tab.id === "all") setParams({});
-                else setParams({ tab: tab.id });
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
+      <div className="toolbar">
+        <div className="toolbar-group">
+          <div className="tabs" role="tablist" aria-label="Filter runs">
+            {TABS.map((tab) => (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={filter === tab.id}
+                className="tab"
+                onClick={() => {
+                  const next = new URLSearchParams(params);
+                  next.delete("new");
+                  if (tab.id === "all") next.delete("tab");
+                  else next.set("tab", tab.id);
+                  setParams(next, { replace: true });
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <span className="count-note">
+            {rows.length}
+            {needle ? ` of ${all.length}` : ""} run{rows.length === 1 ? "" : "s"}
+          </span>
         </div>
-        <span className="tiny faint">{rows.length} shown</span>
+        <label className="search">
+          <Search size={13} aria-hidden />
+          <input
+            placeholder="Search runs"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            aria-label="Search runs"
+          />
+        </label>
       </div>
 
       <Card flush>
@@ -109,78 +143,83 @@ export function Tasks() {
           <div className="card-body">
             <Notice tone="bad">{errorMessage(tasks.error)}</Notice>
           </div>
-        ) : rows.length === 0 ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Run</th>
-                <th>Status</th>
-                <th>Progress</th>
-                <th>Attempts</th>
-                <th style={{ textAlign: "right" }}>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="table-empty">
-                <td colSpan={5}>
-                  <Empty
-                    icon={<ListChecks size={18} />}
-                    title={filter === "all" ? "No runs yet" : "Nothing in this filter"}
-                    body={
-                      filter === "all"
-                        ? "A run starts when you give the agent a job that takes more than one step. It keeps going in slices, so closing the tab does not stop it."
-                        : "Try another filter, or start a new run."
-                    }
-                    action={
-                      <Button size="sm" icon={<Plus size={14} />} onClick={() => setOpen(true)}>
-                        New run
-                      </Button>
-                    }
-                  />
-                </td>
-              </tr>
-            </tbody>
-          </table>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table className="table">
+            <table className="table table-runs">
               <thead>
                 <tr>
                   <th>Run</th>
                   <th>Status</th>
                   <th>Progress</th>
-                  <th>Attempts</th>
+                  <th style={{ textAlign: "right" }}>Attempts</th>
                   <th style={{ textAlign: "right" }}>Updated</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((task) => (
-                  <tr key={task.id}>
-                    <td>
-                      <Link to={`/tasks/${task.id}`} style={{ color: "inherit", fontWeight: 600 }}>
-                        {task.title}
-                      </Link>
-                      <div className="tiny faint truncate" style={{ maxWidth: 460 }}>
-                        {task.goal}
-                      </div>
+                {rows.length === 0 ? (
+                  <tr className="table-empty">
+                    <td colSpan={5}>
+                      <Empty
+                        icon={<ListChecks size={15} />}
+                        title={
+                          needle
+                            ? "No runs match that search"
+                            : filter === "all"
+                              ? "No runs yet"
+                              : "Nothing in this filter"
+                        }
+                        body={
+                          needle
+                            ? "Try a shorter phrase, or clear the search."
+                            : filter === "all"
+                              ? "A run starts when you give the agent a job that takes more than one step. It keeps going in slices, so closing the tab does not stop it."
+                              : "Try another filter, or start a new run."
+                        }
+                        action={
+                          needle ? (
+                            <Button size="sm" onClick={() => setQuery("")}>
+                              Clear search
+                            </Button>
+                          ) : (
+                            <Button size="sm" icon={<Plus size={13} />} onClick={() => setOpen(true)}>
+                              New run
+                            </Button>
+                          )
+                        }
+                      />
                     </td>
-                    <td>
-                      <StatusBadge status={task.status} />
-                    </td>
-                    <td>
-                      <div className="row" style={{ gap: 8, minWidth: 120 }}>
-                        <div className="bar" style={{ width: 80 }}>
-                          <span style={{ width: `${Math.max(2, task.progress)}%` }} />
-                        </div>
-                        <span className="mono tiny faint">{task.progress}%</span>
-                      </div>
-                    </td>
-                    <td className="num">
-                      {task.attempts}/{task.maxAttempts}
-                    </td>
-                    <td className="num">{timeAgo(task.updatedAt)}</td>
                   </tr>
-                ))}
+                ) : (
+                  rows.map((task) => (
+                    <tr key={task.id}>
+                      <td className="run-cell">
+                        <Link
+                          to={`/tasks/${task.id}`}
+                          className="cell-title"
+                          style={{ color: "inherit" }}
+                        >
+                          {task.title}
+                        </Link>
+                        <div className="tiny faint truncate run-goal">{task.goal}</div>
+                      </td>
+                      <td>
+                        <StatusBadge status={task.status} />
+                      </td>
+                      <td>
+                        <div className="row" style={{ gap: 8, minWidth: 116 }}>
+                          <div className="bar" style={{ width: 70 }}>
+                            <span style={{ width: `${Math.max(2, task.progress)}%` }} />
+                          </div>
+                          <span className="mono tiny faint">{task.progress}%</span>
+                        </div>
+                      </td>
+                      <td className="num" title={`${task.attempts} of ${task.maxAttempts} attempts used`}>
+                        {task.attempts}/{task.maxAttempts}
+                      </td>
+                      <td className="num">{timeAgo(task.updatedAt)}</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -189,11 +228,11 @@ export function Tasks() {
 
       <Modal
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={close}
         title="New run"
         footer={
           <>
-            <Button variant="quiet" onClick={() => setOpen(false)}>
+            <Button variant="quiet" onClick={close}>
               Cancel
             </Button>
             <Button
@@ -213,7 +252,7 @@ export function Tasks() {
         <Field
           label="What should it accomplish?"
           htmlFor="goal"
-          hint="Be specific about the outcome, not the clicks."
+          hint="Be specific about the outcome, not the clicks. The agent writes the steps."
         >
           <Textarea
             id="goal"
@@ -221,16 +260,30 @@ export function Tasks() {
             onChange={(event) => setGoal(event.target.value)}
             placeholder="Find three suppliers for recycled packaging under €2 per unit and put the comparison in a PDF."
             autoFocus
+            onKeyDown={(event) => {
+              if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && goal.trim().length >= 8) {
+                event.preventDefault();
+                setProblem(null);
+                create.mutate();
+              }
+            }}
           />
         </Field>
-        <Field label="Starting points" htmlFor="seeds" hint="Optional. One URL per line or comma separated.">
-          <Input
-            id="seeds"
-            value={seeds}
-            onChange={(event) => setSeeds(event.target.value)}
-            placeholder="https://example.com/pricing"
-          />
-        </Field>
+        <details>
+          <summary className="tiny muted" style={{ cursor: "pointer" }}>
+            Add starting pages (optional)
+          </summary>
+          <div style={{ marginTop: 10 }}>
+            <Field label="URLs" htmlFor="seeds" hint="One per line or comma separated. The agent can also search.">
+              <Input
+                id="seeds"
+                value={seeds}
+                onChange={(event) => setSeeds(event.target.value)}
+                placeholder="https://example.com/pricing"
+              />
+            </Field>
+          </div>
+        </details>
         {problem ? <Notice tone="bad">{problem}</Notice> : null}
       </Modal>
     </div>

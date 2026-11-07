@@ -1,18 +1,70 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Download, FileText, Package, Search } from "lucide-react";
-import { api } from "../lib/api";
+import { Download, FileArchive, FileImage, FileText, Package, Search } from "lucide-react";
+import { api, type Artifact } from "../lib/api";
 import { errorMessage } from "../lib/queries";
-import { Badge, Button, Card, Empty, Input, Notice, Skeleton, bytes, timeAgo } from "../ui";
+import { Badge, Button, Card, Empty, Notice, Skeleton, bytes, timeAgo } from "../ui";
+
+function iconFor(mime: string) {
+  if (mime.startsWith("image/")) return <FileImage size={15} />;
+  if (mime.includes("zip") || mime.includes("tar")) return <FileArchive size={15} />;
+  return <FileText size={15} />;
+}
+
+function typeLabel(mime: string): string {
+  const tail = mime.split("/").pop() ?? mime;
+  return tail.toUpperCase();
+}
+
+function FileCard({ artifact }: { artifact: Artifact }) {
+  return (
+    <div className="file-card">
+      <div className="row" style={{ gap: 9 }}>
+        <span className="file-icon">{iconFor(artifact.mime)}</span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div className="file-name" title={artifact.name}>
+            {artifact.name}
+          </div>
+          <div className="file-meta" style={{ marginTop: 2 }}>
+            {typeLabel(artifact.mime)}
+          </div>
+        </div>
+      </div>
+      <div className="row" style={{ gap: 6 }}>
+        <span className="file-meta">{bytes(artifact.sizeBytes)}</span>
+        <span className="file-meta">·</span>
+        <span className="file-meta">{timeAgo(artifact.createdAt)}</span>
+        <span style={{ marginLeft: "auto" }}>
+          <Badge tone="plain">{artifact.sha256.slice(0, 7)}</Badge>
+        </span>
+      </div>
+      <div className="file-foot">
+        {artifact.taskId ? (
+          <Link to={`/tasks/${artifact.taskId}`} className="tiny muted">
+            Open run
+          </Link>
+        ) : (
+          <span className="tiny faint">No run</span>
+        )}
+        <a href={api.artifactUrl(artifact.id)} download aria-label={`Download ${artifact.name}`}>
+          <Button size="sm" icon={<Download size={12} />}>
+            Download
+          </Button>
+        </a>
+      </div>
+    </div>
+  );
+}
 
 export function Artifacts() {
   const query = useQuery({ queryKey: ["artifacts"], queryFn: api.artifacts });
   const [filter, setFilter] = useState("");
 
   const all = query.data?.artifacts ?? [];
+  const needle = filter.trim().toLowerCase();
   const rows = all.filter((artifact) =>
-    `${artifact.name} ${artifact.mime}`.toLowerCase().includes(filter.trim().toLowerCase()),
+    `${artifact.name} ${artifact.mime}`.toLowerCase().includes(needle),
   );
 
   return (
@@ -25,36 +77,39 @@ export function Artifacts() {
             this deployment.
           </p>
         </div>
-        <div className="row" style={{ width: "min(280px, 100%)" }}>
-          <Search size={14} className="faint" aria-hidden />
-          <Input
-            placeholder="Filter by name or type"
+        <label className="search">
+          <Search size={13} aria-hidden />
+          <input
+            placeholder="Filter files"
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
             aria-label="Filter artifacts"
           />
-        </div>
+        </label>
       </div>
 
       {query.isError ? <Notice tone="bad">{errorMessage(query.error)}</Notice> : null}
 
-      <Card flush>
-        {query.isLoading ? (
-          <div className="card-body stack">
-            <Skeleton h={18} w="55%" />
-            <Skeleton h={18} w="40%" />
-          </div>
-        ) : rows.length === 0 ? (
+      {query.isLoading ? (
+        <div className="file-grid">
+          {[0, 1, 2].map((key) => (
+            <Card key={key}>
+              <Skeleton h={90} />
+            </Card>
+          ))}
+        </div>
+      ) : rows.length === 0 ? (
+        <Card>
           <Empty
-            icon={<Package size={18} />}
-            title={filter ? "Nothing matches that filter" : "No artifacts yet"}
+            icon={<Package size={15} />}
+            title={needle ? "Nothing matches that filter" : "No artifacts yet"}
             body={
-              filter
+              needle
                 ? "Try a shorter search, or clear it to see everything."
                 : "When a run writes a PDF, a document, or a data file, it lands here and stays attached to the run that made it."
             }
             action={
-              filter ? (
+              needle ? (
                 <Button size="sm" onClick={() => setFilter("")}>
                   Clear filter
                 </Button>
@@ -65,57 +120,25 @@ export function Artifacts() {
               )
             }
           />
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>File</th>
-                  <th>Type</th>
-                  <th style={{ textAlign: "right" }}>Size</th>
-                  <th>Created</th>
-                  <th>Run</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((artifact) => (
-                  <tr key={artifact.id}>
-                    <td>
-                      <div className="row" style={{ gap: 8 }}>
-                        <FileText size={14} className="muted" aria-hidden />
-                        <span style={{ fontWeight: 550 }}>{artifact.name}</span>
-                      </div>
-                      <div className="mono tiny faint">{artifact.sha256.slice(0, 16)}</div>
-                    </td>
-                    <td>
-                      <Badge tone="info">{artifact.mime.split("/").pop()}</Badge>
-                    </td>
-                    <td className="num">{bytes(artifact.sizeBytes)}</td>
-                    <td className="num">{timeAgo(artifact.createdAt)}</td>
-                    <td>
-                      {artifact.taskId ? (
-                        <Link to={`/tasks/${artifact.taskId}`} className="tiny">
-                          Open
-                        </Link>
-                      ) : (
-                        <span className="tiny faint">—</span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      <a href={api.artifactUrl(artifact.id)} aria-label={`Download ${artifact.name}`}>
-                        <Button size="sm" icon={<Download size={13} />}>
-                          Download
-                        </Button>
-                      </a>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        </Card>
+      ) : (
+        <>
+          <div className="toolbar">
+            <span className="count-note">
+              {rows.length}
+              {needle ? ` of ${all.length}` : ""} file{rows.length === 1 ? "" : "s"}
+            </span>
+            <span className="tiny faint">
+              Stored in {query.data ? "this deployment" : "—"} · content-addressed
+            </span>
           </div>
-        )}
-      </Card>
+          <div className="file-grid">
+            {rows.map((artifact) => (
+              <FileCard key={artifact.id} artifact={artifact} />
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

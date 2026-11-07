@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, Sparkles } from "lucide-react";
+import { Check } from "lucide-react";
 import { api, type AuthResult } from "../lib/api";
 import { errorMessage } from "../lib/queries";
 import { Button, Field, Input, Notice } from "../ui";
@@ -63,38 +63,57 @@ export function SignIn({ mode }: { mode: "in" | "up" }) {
       <aside className="auth-brand">
         <div className="brand" style={{ padding: 0 }}>
           <span className="brand-mark">
-            <BrandMark size={26} />
+            <BrandMark size={24} />
           </span>
           <span className="brand-name">Talisman</span>
         </div>
 
-        <h1 className="auth-headline">Work that keeps going after you close the tab.</h1>
+        <div style={{ marginTop: "auto" }}>
+          <span className="eyebrow">Agent workspace</span>
+          <h1 className="auth-headline" style={{ marginTop: 10 }}>
+            Work that keeps going after you close the tab.
+          </h1>
+          <p className="small muted" style={{ marginTop: 12, maxWidth: "42ch", lineHeight: 1.6 }}>
+            Give it a job in plain language. It plans, works in a real browser, and comes back only
+            when a decision needs you.
+          </p>
+        </div>
+
         <ul className="auth-points">
           <li>
-            <Check size={14} aria-hidden />
-            <span>Runs in a real browser, not a chat window that forgets.</span>
+            <Check size={13} aria-hidden />
+            <span>Durable runs, not a chat window that forgets.</span>
           </li>
           <li>
-            <Check size={14} aria-hidden />
-            <span>Asks before it sends, pays, or deletes anything.</span>
+            <Check size={13} aria-hidden />
+            <span>Approvals before anything sends, pays, or deletes.</span>
           </li>
           <li>
-            <Check size={14} aria-hidden />
+            <Check size={13} aria-hidden />
             <span>Your workspace, your database, your model keys.</span>
           </li>
         </ul>
+
+        <div className="auth-foot" style={{ marginTop: 0, width: "100%" }}>
+          <span>Real browser · Durable runs</span>
+          <span>v0.2</span>
+        </div>
 
         <span className="auth-dither dither" aria-hidden />
       </aside>
 
       <main className="auth-form">
         <div className="auth-card">
-          <div className="stack" style={{ gap: 6 }}>
-            <span className="badge" data-tone="plain">
-              <Sparkles size={11} aria-hidden /> {mode === "up" ? "New workspace" : "Welcome back"}
+          <div className="brand" style={{ padding: 0, marginBottom: 4 }}>
+            <span className="brand-mark">
+              <BrandMark size={22} />
             </span>
-            <h2 style={{ fontSize: "var(--text-2xl)", letterSpacing: "-0.03em" }}>
-              {mode === "up" ? "Create your workspace" : "Sign in to Talisman"}
+            <span className="brand-name">Talisman</span>
+          </div>
+
+          <div className="stack" style={{ gap: 5 }}>
+            <h2 style={{ fontSize: "var(--text-xl)", letterSpacing: "-0.025em" }}>
+              {mode === "up" ? "Create your workspace" : "Sign in"}
             </h2>
             <p className="small muted">
               {mode === "up"
@@ -103,7 +122,7 @@ export function SignIn({ mode }: { mode: "in" | "up" }) {
             </p>
           </div>
 
-          <form className="stack" style={{ gap: "var(--space-4)" }} onSubmit={onSubmit} noValidate>
+          <form className="stack" style={{ gap: "var(--space-3)" }} onSubmit={onSubmit} noValidate>
             {mode === "up" ? (
               <Field label="Your name" htmlFor="name" hint="Optional. Used in the sidebar.">
                 <Input
@@ -145,7 +164,11 @@ export function SignIn({ mode }: { mode: "in" | "up" }) {
             </Field>
 
             {mode === "up" ? (
-              <Field label="Workspace name" htmlFor="org" hint="Shown across the app. Rename any time.">
+              <Field
+                label="Workspace name"
+                htmlFor="org"
+                hint="Shown across the app. Rename any time."
+              >
                 <Input
                   id="org"
                   value={orgName}
@@ -180,6 +203,11 @@ export function SignIn({ mode }: { mode: "in" | "up" }) {
               </>
             )}
           </p>
+
+          <div className="auth-foot">
+            <span>Encrypted session cookie</span>
+            <span>No tracking</span>
+          </div>
         </div>
       </main>
     </div>
