@@ -1,0 +1,40 @@
+name: Talisman scheduler
+
+on:
+  schedule:
+    # GitHub's shortest supported interval. Vercel Hobby cron is daily-only, so
+    # this authenticated tick is what keeps recurring schedules near their time.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: talisman-scheduler
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Wake the production scheduler
+        env:
+          CRON_SECRET: ${{ secrets.TALISMAN_CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::TALISMAN_CRON_SECRET is not configured"
+            exit 1
+          fi
+          status=$(curl -sS --max-time 90 \
+            -o tick.json \
+            -w "%{http_code}" \
+            -X POST "https://talisman-agent.vercel.app/api/internal/tick" \
+            -H "Authorization: Bearer $CRON_SECRET")
+          cat tick.json
+          echo "HTTP $status"
+          case "$status" in
+            2*) ;;
+            *) echo "::error::Scheduler tick failed with HTTP $status"; exit 1 ;;
+          esac

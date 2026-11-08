@@ -47,7 +47,10 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
   in light and dark themes on desktop and mobile.
 - Recurring schedules: an interval or a daily wall-clock time in any IANA timezone.
   Due schedules become ordinary durable runs and are claimed atomically, so two
-  overlapping cron invocations cannot double-run one schedule.
+  overlapping cron invocations cannot double-run one schedule. A long-running
+  host uses `npm run worker`; the Vercel deployment has a daily cron fallback and
+  `.github/workflows/scheduler.yml` calls the authenticated tick every five
+  minutes (Vercel Hobby does not allow more than one cron per day).
 - A notification inbox for finished runs, failures and pending approvals, with an
   unread badge in the top bar.
 - Semantic memory: Gemini embeddings are stored with each memory and recall ranks
