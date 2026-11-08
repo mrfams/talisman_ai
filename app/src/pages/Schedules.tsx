@@ -316,6 +316,12 @@ export function Schedules() {
                 <span className="tiny faint">
                   Last {schedule.lastRunAt ? timeAgo(schedule.lastRunAt) : "never"}
                 </span>
+                {schedule.lastSkippedAt ? (
+                  <span className="tiny faint" title={schedule.lastSkipReason ?? undefined}>
+                    Skipped {timeAgo(schedule.lastSkippedAt)}
+                    {schedule.lastSkipReason ? ` — ${schedule.lastSkipReason}` : ""}
+                  </span>
+                ) : null}
                 {schedule.lastTaskId ? (
                   <Link className="tiny" to={`/tasks/${schedule.lastTaskId}`}>
                     Open last run

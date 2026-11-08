@@ -33,9 +33,12 @@ let lastScheduleCheck = 0;
 async function tick(): Promise<void> {
   if (Date.now() - lastScheduleCheck >= 15_000) {
     lastScheduleCheck = Date.now();
-    const dispatched = await runDueSchedules(database);
-    if (dispatched.length > 0) {
-      log.info("scheduled runs queued", { count: dispatched.length });
+    const dispatch = await runDueSchedules(database);
+    if (dispatch.scheduled.length > 0 || dispatch.skipped.length > 0) {
+      log.info("scheduled runs processed", {
+        queued: dispatch.scheduled.length,
+        skipped: dispatch.skipped.length,
+      });
     }
   }
   const orgIds = await listOrgIds(database.driver);

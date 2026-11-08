@@ -254,6 +254,8 @@ export interface Schedule {
   nextRunAt: string;
   lastRunAt: string | null;
   lastTaskId: string | null;
+  lastSkippedAt: string | null;
+  lastSkipReason: string | null;
   createdAt: string;
 }
 

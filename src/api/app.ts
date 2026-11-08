@@ -1350,10 +1350,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!deps.engine) throw errors.unavailable("This deployment has no executor");
     const startedAt = Date.now();
     const budget = deps.config.maxRunMs;
-    let scheduled: Awaited<ReturnType<typeof runDueSchedules>> = [];
+    let scheduleDispatch: Awaited<ReturnType<typeof runDueSchedules>> = {
+      scheduled: [],
+      skipped: [],
+    };
     let scheduleError: string | null = null;
     try {
-      scheduled = await runDueSchedules(deps.database);
+      scheduleDispatch = await runDueSchedules(deps.database);
     } catch (error) {
       scheduleError = error instanceof Error ? error.message : String(error);
       log.error("scheduled dispatch failed", { error: scheduleError });
@@ -1373,8 +1376,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const response = {
       ok: scheduleError === null,
       ran: results.length,
-      scheduled: scheduled.length,
-      scheduledTasks: scheduled,
+      scheduled: scheduleDispatch.scheduled.length,
+      skipped: scheduleDispatch.skipped.length,
+      scheduledTasks: scheduleDispatch.scheduled,
+      skippedSchedules: scheduleDispatch.skipped,
       results,
       durationMs: Date.now() - startedAt,
       ...(scheduleError ? { error: `Scheduler dispatch failed: ${scheduleError}` } : {}),

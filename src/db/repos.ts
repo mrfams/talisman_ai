@@ -915,6 +915,11 @@ function mapSchedule(row: Row): Schedule {
     nextRunAt: iso(row.next_run_at),
     lastRunAt: isoOrNull(row.last_run_at),
     lastTaskId: row.last_task_id === null ? null : String(row.last_task_id),
+    lastSkippedAt: isoOrNull(row.last_skipped_at),
+    lastSkipReason:
+      row.last_skip_reason === null || row.last_skip_reason === undefined
+        ? null
+        : String(row.last_skip_reason),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -999,6 +1004,8 @@ const SCHEDULE_COLUMNS: Record<string, string> = {
   nextRunAt: "next_run_at",
   lastRunAt: "last_run_at",
   lastTaskId: "last_task_id",
+  lastSkippedAt: "last_skipped_at",
+  lastSkipReason: "last_skip_reason",
 };
 
 export async function updateSchedule(

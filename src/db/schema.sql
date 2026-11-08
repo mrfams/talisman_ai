@@ -211,9 +211,14 @@ CREATE TABLE IF NOT EXISTS schedules (
   next_run_at timestamptz NOT NULL,
   last_run_at timestamptz,
   last_task_id text REFERENCES tasks(id) ON DELETE SET NULL,
+  last_skipped_at timestamptz,
+  last_skip_reason text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- Existing deployments predate overlap protection; make the upgrade in place.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_skipped_at timestamptz;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_skip_reason text;
 CREATE INDEX IF NOT EXISTS schedules_org_user_idx ON schedules (org_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules (enabled, next_run_at);
 

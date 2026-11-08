@@ -222,19 +222,60 @@ test("a due schedule creates one ordinary task and advances its next run", async
       }),
     );
     const dispatched = await runDueSchedules(database);
-    assert.equal(dispatched.length, 1);
-    assert.equal(dispatched[0]!.scheduleId, schedule.id);
+    assert.equal(dispatched.scheduled.length, 1);
+    assert.equal(dispatched.scheduled[0]!.scheduleId, schedule.id);
 
     const state = await database.withTenant(user.orgId, user.id, async (conn) => ({
       schedule: await getSchedule(conn, schedule.id, user.orgId, user.id),
-      task: await getTask(conn, dispatched[0]!.taskId),
+      task: await getTask(conn, dispatched.scheduled[0]!.taskId),
     }));
     assert.equal(state.task?.status, "queued");
     assert.equal(state.schedule?.lastTaskId, state.task?.id);
     assert.ok(new Date(state.schedule!.nextRunAt).getTime() > Date.now());
 
     const repeated = await runDueSchedules(database);
-    assert.equal(repeated.length, 0, "a dispatched schedule must not fire twice");
+    assert.equal(repeated.scheduled.length, 0, "a dispatched schedule must not fire twice");
+  } finally {
+    await database.close();
+  }
+});
+
+test("a schedule skips a due occurrence while its previous run is active", async () => {
+  const database = await makeDatabase();
+  const { user } = await makeUser(database);
+  try {
+    const schedule = await database.withTenant(user.orgId, user.id, (conn) =>
+      createSchedule(conn, {
+        id: "schedule-overlap-1",
+        orgId: user.orgId,
+        userId: user.id,
+        title: "Overlap check",
+        goal: "Check for new messages.",
+        kind: "interval",
+        intervalMinutes: 5,
+        timezone: "UTC",
+        nextRunAt: new Date(Date.now() - 1000),
+      }),
+    );
+    const first = await runDueSchedules(database);
+    assert.equal(first.scheduled.length, 1);
+
+    await database.withTenant(user.orgId, user.id, (conn) =>
+      conn.query("UPDATE schedules SET next_run_at = now() - interval '1 second' WHERE id = $1", [
+        schedule.id,
+      ]),
+    );
+    const second = await runDueSchedules(database);
+    assert.equal(second.scheduled.length, 0);
+    assert.equal(second.skipped.length, 1);
+    assert.match(second.skipped[0]!.reason, /still queued/i);
+
+    const state = await database.withTenant(user.orgId, user.id, (conn) =>
+      getSchedule(conn, schedule.id, user.orgId, user.id),
+    );
+    assert.ok(state?.lastSkippedAt);
+    assert.match(state?.lastSkipReason ?? "", /still queued/i);
+    assert.ok(new Date(state!.nextRunAt).getTime() > Date.now());
   } finally {
     await database.close();
   }

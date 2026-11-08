@@ -3,6 +3,7 @@ import {
   appendEvent,
   claimDueSchedules,
   createTask,
+  getTask,
   listOrgIds,
   updateSchedule,
 } from "../db/repos.js";
@@ -104,6 +105,20 @@ export interface ScheduledTask {
   nextRunAt: string;
 }
 
+export interface SkippedSchedule {
+  scheduleId: string;
+  title: string;
+  reason: string;
+  nextRunAt: string;
+}
+
+export interface DueScheduleDispatch {
+  scheduled: ScheduledTask[];
+  skipped: SkippedSchedule[];
+}
+
+const ACTIVE_TASK_STATUSES = ["queued", "scheduled", "running", "waiting_approval", "paused"];
+
 /**
  * Dispatch due schedules as ordinary queued tasks. The schedule row is locked
  * with SKIP LOCKED and updated in the same transaction as task creation, so two
@@ -112,15 +127,35 @@ export interface ScheduledTask {
 export async function runDueSchedules(
   database: Database,
   options: { limitPerOrg?: number } = {},
-): Promise<ScheduledTask[]> {
+): Promise<DueScheduleDispatch> {
   const created: ScheduledTask[] = [];
+  const skipped: SkippedSchedule[] = [];
   const orgIds = await listOrgIds(database.driver);
   for (const orgId of orgIds) {
     const batch = await database.withTenant(orgId, "service", async (conn) => {
       const due = await claimDueSchedules(conn, orgId, options.limitPerOrg ?? 20);
       const dispatched: ScheduledTask[] = [];
+      const deferred: SkippedSchedule[] = [];
       for (const schedule of due) {
         const now = new Date();
+        const previous = schedule.lastTaskId ? await getTask(conn, schedule.lastTaskId) : null;
+        if (previous && ACTIVE_TASK_STATUSES.includes(previous.status)) {
+          const reason = `Previous run is still ${previous.status.replace(/_/g, " ")}`;
+          const next = nextRunAt(schedule, now);
+          await updateSchedule(conn, schedule.id, orgId, schedule.userId, {
+            lastSkippedAt: now,
+            lastSkipReason: reason,
+            nextRunAt: next,
+          });
+          deferred.push({
+            scheduleId: schedule.id,
+            title: schedule.title,
+            reason,
+            nextRunAt: next.toISOString(),
+          });
+          continue;
+        }
+
         const plan = planGoal(schedule.goal);
         const task = await createTask(conn, {
           orgId,
@@ -149,9 +184,10 @@ export async function runDueSchedules(
           nextRunAt: next.toISOString(),
         });
       }
-      return dispatched;
+      return { dispatched, deferred };
     });
-    created.push(...batch);
+    created.push(...batch.dispatched);
+    skipped.push(...batch.deferred);
   }
-  return created;
+  return { scheduled: created, skipped };
 }
