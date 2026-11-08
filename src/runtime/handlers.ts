@@ -49,17 +49,19 @@ export const researchCollect: StepHandler = async (context) => {
   const failures: Array<{ url: string; error: string }> = [];
 
   if (urls.length === 0) {
-    if (!context.searchUrl) {
-      throw new Error(
-        "The request contains no URLs and no search provider is configured (TALISMAN_SEARCH_URL).",
-      );
-    }
-    await context.report("log", "Searching the web", "Using the configured search provider");
-    const results = await searchWeb(searchQuery(context.task.goal), context.searchUrl, {
+    await context.report(
+      "log",
+      "Searching the web",
+      context.searchUrl
+        ? "Using the configured search provider with a fallback"
+        : "Using the built-in search fallback",
+    );
+    const results = await searchWeb(searchQuery(context.task.goal), context.searchUrl ?? "", {
       provider: context.searchProvider,
       apiKey: context.searchApiKey,
       signal: context.signal,
       limit: 5,
+      fallback: true,
     });
     urls = results.map((result) => result.url);
     if (urls.length === 0) throw new Error("The search provider returned no results");

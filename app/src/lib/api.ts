@@ -373,7 +373,13 @@ export const api = {
 
 export interface StreamHandlers {
   onText: (text: string) => void;
-  onTool: (event: { phase: "start" | "end"; name: string; args?: unknown; ok?: boolean }) => void;
+  onTool: (event: {
+    phase: "start" | "end";
+    name: string;
+    args?: unknown;
+    ok?: boolean;
+    task?: { id: string; status: string; progress: number };
+  }) => void;
   onApproval?: (approval: {
     id: string;
     summary: string;
@@ -388,17 +394,25 @@ export interface StreamHandlers {
  * The chat endpoint is POST + SSE: the request carries the message, the response
  * streams text deltas and tool calls. Nothing here buffers the whole reply.
  */
+export interface StreamMessageOptions {
+  /** A continuation after an approval; the server does not store it as a user message. */
+  internal?: boolean;
+  /** Context for the continuation, such as the approved action's result. */
+  context?: string;
+}
+
 export async function streamMessage(
   conversationId: string,
   content: string,
   handlers: StreamHandlers,
   signal?: AbortSignal,
+  options: StreamMessageOptions = {},
 ): Promise<void> {
   const response = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json", accept: "text/event-stream" },
-    body: body({ content }),
+    body: body({ content, ...options }),
     signal,
   });
   if (!response.ok) throw await errorFrom(response);
@@ -420,7 +434,13 @@ export async function streamMessage(
     if (event === "text") handlers.onText(payload);
     else if (event === "tool") {
       try {
-        handlers.onTool(JSON.parse(payload) as { phase: "start" | "end"; name: string });
+        handlers.onTool(
+          JSON.parse(payload) as {
+            phase: "start" | "end";
+            name: string;
+            task?: { id: string; status: string; progress: number };
+          },
+        );
       } catch {
         // A malformed tool frame should not kill the stream.
       }

@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ArrowUp, Check, MessageSquarePlus, Square, Wrench, X } from "lucide-react";
+import { ArrowRight, ArrowUp, Check, ListChecks, MessageSquarePlus, Square, Wrench, X } from "lucide-react";
 import { api, streamMessage, type PhoneApproval, type StoredMessage } from "../lib/api";
 import { errorMessage, useConversations, useMessages } from "../lib/queries";
 import { Button, Markdown, Notice, Skeleton, timeAgo } from "../ui";
 import { BrandMark } from "../BrandMark";
+
+interface RunInfo {
+  id: string;
+  status: string;
+  progress: number;
+}
 
 const OPENERS = [
   "Research a company and write a one-page brief",
@@ -32,6 +38,7 @@ export function Chat() {
   const [draft, setDraft] = useState(() => params.get("q") ?? "");
   const [liveText, setLiveText] = useState("");
   const [tools, setTools] = useState<{ name: string; phase: "start" | "end" }[]>([]);
+  const [runs, setRuns] = useState<RunInfo[]>([]);
   const [phoneApprovals, setPhoneApprovals] = useState<PhoneApproval[]>([]);
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [approvalNote, setApprovalNote] = useState<{
@@ -45,6 +52,9 @@ export function Chat() {
   const scroller = useRef<HTMLDivElement | null>(null);
   const input = useRef<HTMLTextAreaElement | null>(null);
   const autoStarted = useRef(false);
+  const phoneTurns = useRef(0);
+  const streaming = useRef(false);
+  const streamSeq = useRef(0);
 
   const shown = messages.data ?? [];
   const activeTitle = conversations.data?.find((thread) => thread.id === id)?.title;
@@ -67,18 +77,34 @@ export function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function send(text = draft) {
+  async function send(
+    text = draft,
+    options: { internal?: boolean; context?: string } = {},
+  ) {
     const body = text.trim();
-    if (!body || sending) return;
+    if (!body || streaming.current) return;
+    if (options.internal && phoneTurns.current >= 8) {
+      setApprovalNote({
+        tone: "warn",
+        text: "The phone task paused after 8 steps. Ask me to continue when you are ready.",
+      });
+      return;
+    }
+    streaming.current = true;
+    const streamId = ++streamSeq.current;
+    if (options.internal) phoneTurns.current += 1;
+    else phoneTurns.current = 0;
 
     setSending(true);
     setProblem(null);
-    setDraft("");
-    setPending(body);
+    if (!options.internal) {
+      setDraft("");
+      setPending(body);
+      setPhoneApprovals([]);
+      setApprovalNote(null);
+    }
     setLiveText("");
     setTools([]);
-    setPhoneApprovals([]);
-    setApprovalNote(null);
 
     let conversationId = id;
     try {
@@ -96,8 +122,16 @@ export function Chat() {
         body,
         {
           onText: (chunk) => setLiveText((current) => current + chunk),
-          onTool: (event) =>
-            setTools((current) => [...current, { name: event.name, phase: event.phase }]),
+          onTool: (event) => {
+            setTools((current) => [...current, { name: event.name, phase: event.phase }]);
+            if (event.task) {
+              const task = event.task;
+              setRuns((current) => [
+                ...current.filter((run) => run.id !== task.id),
+                task,
+              ]);
+            }
+          },
           onApproval: (approval) => {
             setPhoneApprovals((current) => [
               ...current.filter((item) => item.id !== approval.id),
@@ -118,29 +152,40 @@ export function Chat() {
           onError: (message) => setProblem(message),
         },
         controller.signal,
+        { internal: options.internal, context: options.context },
       );
     } catch (error) {
       if ((error as Error).name !== "AbortError") setProblem(errorMessage(error));
     } finally {
-      abort.current = null;
-      setPending(null);
-      setSending(false);
-      if (conversationId) {
-        await client.invalidateQueries({ queryKey: ["messages", conversationId] });
-        await client.invalidateQueries({ queryKey: ["conversations"] });
-        setLiveText("");
-        setTools([]);
+      // A stopped or superseded stream must not clear the state of the request
+      // that replaced it. The invisible continuation after a phone approval
+      // depends on this guard.
+      if (streamSeq.current === streamId) {
+        abort.current = null;
+        streaming.current = false;
+        setPending(null);
+        setSending(false);
+        if (conversationId) {
+          await client.invalidateQueries({ queryKey: ["messages", conversationId] });
+          await client.invalidateQueries({ queryKey: ["conversations"] });
+          setLiveText("");
+          setTools([]);
+        }
+        input.current?.focus();
       }
-      input.current?.focus();
     }
   }
 
   function stop() {
+    streamSeq.current += 1;
+    streaming.current = false;
     abort.current?.abort();
+    abort.current = null;
     setSending(false);
   }
 
   async function decidePhoneApproval(id: string, decision: "approved" | "denied") {
+    const summary = phoneApprovals.find((item) => item.id === id)?.summary ?? "phone action";
     setApprovalBusy(id);
     setApprovalNote(null);
     try {
@@ -148,17 +193,31 @@ export function Chat() {
       setPhoneApprovals((current) => current.filter((item) => item.id !== id));
       if (decision === "denied") {
         setApprovalNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
-      } else if (result.command?.status === "done") {
+        return;
+      }
+
+      let outcome: string;
+      if (result.command?.status === "done") {
+        outcome = `The approved action completed on the phone: ${summary}.`;
         setApprovalNote({ tone: "neutral", text: "Approved and completed on the phone." });
       } else if (result.command?.status === "error") {
+        outcome = `The approved action failed on the phone: ${result.command.error ?? "unknown error"}.`;
         setApprovalNote({
           tone: "bad",
           text: `Approved, but the phone returned an error: ${result.command.error ?? "unknown"}`,
         });
       } else {
+        outcome = `The approved action was queued but the phone has not confirmed it yet: ${summary}.`;
         setApprovalNote({
           tone: "warn",
-          text: "Approved and queued. The phone has not answered yet; keep the companion open.",
+          text: "Approved and queued. Reading the phone screen again…",
+        });
+      }
+
+      if (result.command) {
+        await send("Continue the phone task from the current screen.", {
+          internal: true,
+          context: `${outcome} Continue the original phone request. Do not repeat the action that just ran; read the screen first and take the next step, or say the task is done.`,
         });
       }
     } catch (error) {
@@ -167,6 +226,54 @@ export function Chat() {
       setApprovalBusy(null);
     }
   }
+
+  const activeRunKey = runs
+    .filter((run) => ["queued", "scheduled", "running"].includes(run.status))
+    .map((run) => `${run.id}:${run.status}`)
+    .join("|");
+
+  // A chat-created run keeps moving while this page is open. The serverless
+  // deployment has no always-on worker, so the page drives the next slice and
+  // shows the status instead of leaving the user with an unexplained promise.
+  useEffect(() => {
+    if (!activeRunKey) return;
+    let cancelled = false;
+    let busy = false;
+    const active = runs.filter((run) =>
+      ["queued", "scheduled", "running"].includes(run.status),
+    );
+    const tick = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        for (const run of active) {
+          if (cancelled) return;
+          if (!["waiting_approval", "paused"].includes(run.status)) {
+            await api.taskAction(run.id, "run").catch(() => undefined);
+          }
+          const detail = await api.task(run.id).catch(() => null);
+          if (detail && !cancelled) {
+            setRuns((current) =>
+              current.map((item) =>
+                item.id === run.id
+                  ? { ...item, status: detail.task.status, progress: detail.task.progress }
+                  : item,
+              ),
+            );
+          }
+        }
+      } finally {
+        busy = false;
+      }
+    };
+    void tick();
+    const timer = setInterval(() => void tick(), 2_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRunKey]);
 
   const empty = shown.length === 0 && !pending && !liveText;
 
@@ -321,6 +428,25 @@ export function Chat() {
                       {tool.phase === "end" ? "finished" : "running"}
                     </span>
                   </div>
+                ))}
+              </div>
+            ) : null}
+
+            {runs.length ? (
+              <div className="stack" style={{ gap: 5, paddingLeft: 34 }}>
+                {runs.map((run) => (
+                  <Link
+                    key={run.id}
+                    to={`/tasks/${run.id}`}
+                    className="tool-line"
+                    style={{ textDecoration: "none", color: "inherit" }}
+                  >
+                    <ListChecks size={12} aria-hidden style={{ color: "var(--ok)" }} />
+                    <span>Run {run.id.slice(0, 8)}</span>
+                    <span style={{ opacity: 0.6 }}>
+                      {run.status.replace(/_/g, " ")} · {run.progress}%
+                    </span>
+                  </Link>
                 ))}
               </div>
             ) : null}

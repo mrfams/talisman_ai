@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { searchQuery, searchWeb } from "../src/browser/research.js";
+import { duckDuckGoSearch, searchQuery, searchWeb } from "../src/browser/research.js";
 
 function bodyOf(request: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
@@ -101,6 +101,57 @@ test("APInex search fails clearly without a key", async () => {
     searchWeb("anything", "https://api.apinex.bond/v1", { provider: "apinex" }),
     /requires TALISMAN_SEARCH_API_KEY/,
   );
+});
+
+test("DuckDuckGo fallback decodes result links and snippets", async () => {
+  const html = `
+    <div class="result">
+      <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Ffamara&amp;rut=x">Famara &amp; the name</a>
+      <a class="result__snippet" href="#">A <b>West African</b> name.</a>
+    </div>
+    <div class="result">
+      <a class="result__a" href="https://second.example/page">Second result</a>
+      <div class="result__snippet">Another source.</div>
+    </div>`;
+  const results = await duckDuckGoSearch("famara", {
+    limit: 2,
+    fetchImpl: async () =>
+      new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+  });
+  assert.deepEqual(results, [
+    {
+      title: "Famara & the name",
+      url: "https://example.com/famara",
+      snippet: "A West African name.",
+    },
+    {
+      title: "Second result",
+      url: "https://second.example/page",
+      snippet: "Another source.",
+    },
+  ]);
+});
+
+test("searchWeb falls back to DuckDuckGo when the paid provider fails", async () => {
+  const html = `<a class="result__a" href="https://example.com/famara">Famara</a><a class="result__snippet">A name.</a>`;
+  const results = await searchWeb("famara", "https://api.example/v1", {
+    provider: "apinex",
+    apiKey: "test-key",
+    fallback: true,
+    fetchImpl: async (input) => {
+      const url = String(input);
+      if (url.includes("api.example")) {
+        return Response.json(
+          { error: { message: "Insufficient balance" } },
+          { status: 402 },
+        );
+      }
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    },
+  });
+  assert.deepEqual(results, [
+    { title: "Famara", url: "https://example.com/famara", snippet: "A name." },
+  ]);
 });
 
 test("SearXNG search still maps results", async () => {

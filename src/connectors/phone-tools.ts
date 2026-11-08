@@ -136,6 +136,36 @@ export function phoneTools({
     },
     {
       definition: {
+        name: "phone_scroll",
+        description:
+          "Scroll the current app screen up or down. Use this to find a contact, message, or button that is off screen. Creates an approval card.",
+        parameters: {
+          type: "object",
+          properties: {
+            direction: {
+              type: "string",
+              enum: ["up", "down"],
+              description: "Direction to scroll; defaults to down",
+            },
+          },
+        },
+      },
+      execute: async (args) => {
+        const direction = String(args.direction ?? "down").toLowerCase() === "up" ? "up" : "down";
+        return approval("act", { action: "scroll", direction });
+      },
+    },
+    {
+      definition: {
+        name: "phone_back",
+        description:
+          "Press the Android back button. Use this to leave a search or a conversation. Creates an approval card.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+      execute: async () => approval("act", { action: "global", name: "back" }),
+    },
+    {
+      definition: {
         name: "phone_open_app",
         description:
           "Open an app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it.",

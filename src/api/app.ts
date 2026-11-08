@@ -49,6 +49,9 @@ import { calendarTools } from "../connectors/calendar-tools.js";
 import { createPhone, isPhoneOp, PHONE_OPS } from "../connectors/phone.js";
 import { companionFor } from "../connectors/companion-phone.js";
 import { phoneTools } from "../connectors/phone-tools.js";
+import { webTools } from "../connectors/web-tools.js";
+import { createBrowser } from "../browser/factory.js";
+import type { BrowserDriver } from "../browser/driver.js";
 import { PhoneService, publicDevice } from "../phone/service.js";
 import {
   MAX_FRAME_BYTES,
@@ -74,6 +77,8 @@ export interface AppDeps {
   engine?: TaskEngine;
   /** Injectable for tests; otherwise built from config. */
   google?: GoogleCalendar;
+  /** Injectable for tests; otherwise built from config. */
+  browserFactory?: () => BrowserDriver | null;
 }
 
 type Env = { Variables: { session: SessionInfo; token: string } };
@@ -95,6 +100,21 @@ const taskBody = z.object({
   conversationId: z.string().max(64).optional(),
   seedUrls: z.array(z.string().url()).max(10).optional(),
 });
+
+/** Keep a completed run's answer useful without flooding the chat context. */
+function compactTaskResult(result: unknown): unknown {
+  if (!result || typeof result !== "object") return result;
+  const steps = (result as { steps?: Record<string, unknown> }).steps;
+  if (!steps) return result;
+  const values = Object.values(steps);
+  const report = values.find(
+    (value) =>
+      value &&
+      typeof value === "object" &&
+      Array.isArray((value as { sections?: unknown }).sections),
+  );
+  return report ?? values.at(-1) ?? result;
+}
 
 const decisionBody = z.object({ decision: z.enum(["approved", "denied"]) });
 
@@ -160,6 +180,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     });
   const phone = createPhone(deps.config);
   const phoneService = new PhoneService(deps.database, deps.config.publicUrl);
+  const browserFactory = deps.browserFactory ?? (() => createBrowser(deps.config));
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -705,7 +726,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.post("/api/conversations/:id/messages", async (c) => {
     const { user } = requireUser(c);
     const id = param(c, "id");
-    const body = z.object({ content: z.string().min(1).max(20_000) }).parse(await c.req.json());
+    const body = z
+      .object({
+        content: z.string().min(1).max(20_000),
+        /** A client continuation after an approval; never stored as a user message. */
+        internal: z.boolean().optional(),
+        context: z.string().max(4_000).optional(),
+      })
+      .parse(await c.req.json());
+    const internal = body.internal === true;
 
     const conversation = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       getConversation(conn, id, user.id),
@@ -717,14 +746,16 @@ export function createApp(deps: AppDeps): Hono<Env> {
       );
     }
 
-    await deps.database.withTenant(user.orgId, user.id, async (conn) => {
-      await addMessage(conn, {
-        orgId: user.orgId,
-        conversationId: id,
-        role: "user",
-        content: { text: body.content },
+    if (!internal) {
+      await deps.database.withTenant(user.orgId, user.id, async (conn) => {
+        await addMessage(conn, {
+          orgId: user.orgId,
+          conversationId: id,
+          role: "user",
+          content: { text: body.content },
+        });
       });
-    });
+    }
 
     const history = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       listMessages(conn, id, 40),
@@ -744,11 +775,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
       .catch(() => null);
     const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
     const phoneContext = companionDevice
-      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly: call phone_look first, then phone_tap_text, phone_type, phone_open_app, or phone_home. Do not use create_task for phone control. Those action tools only create an approval card; no action runs until the user presses Allow once. Never say a phone action succeeded until the user confirms it or a tool returns an executed result.`
+      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly: call phone_look first, then phone_tap_text, phone_type, phone_scroll, phone_back, phone_open_app, or phone_home. Do not use create_task for phone control. Those action tools only create an approval card; no action runs until the user presses Allow once. Work through the task step by step: after each approved action the client continues automatically, so read the screen again and take the next step. For a call, open the relevant app, search for the contact, open the conversation, then tap the call control. Never repeat an action that already succeeded. Never say a phone action succeeded until a tool returns an executed result.`
       : "";
+    const continuation =
+      internal && body.context
+        ? `\n\nInternal continuation after a phone approval (not a new user request): ${body.context}\nContinue the original request from the current phone screen. Do not repeat an action that already succeeded. If the requested result is complete, say so plainly.`
+        : "";
     const messages = buildContext({
-      system: `You are Talisman, a personal AI agent. You can create durable tasks that run in a real browser, and remember facts the user shares. Use tools when the user asks for work that should continue in the background. Research, browsing, and documents can become background tasks. Phone control must use the phone tools immediately, because the phone approval is one-shot and interactive.${phoneContext}`,
-      memories: selectMemories(memories, body.content),
+      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look something up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive.${phoneContext}${continuation}`,
+      memories: selectMemories(memories, body.context ?? body.content),
       history: chatHistory,
       budgetTokens: 24_000,
     });
@@ -757,7 +792,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         definition: {
           name: "create_task",
           description:
-            "Create a durable background task for research, browsing, or documents. Never use this for phone control; phone actions must call the phone tools directly.",
+            "Create a durable task for a long multi-step job or a document. It starts immediately and returns its current status or result. Never use this for a quick question you can answer with web_search, and never for phone control.",
           parameters: {
             type: "object",
             properties: {
@@ -797,7 +832,27 @@ export function createApp(deps: AppDeps): Hono<Env> {
               data: plan,
             }),
           );
-          return { taskId: task.id, status: task.status, steps: plan.steps.map((s) => s.title) };
+          let current = task;
+          if (deps.engine) {
+            const claimed = await deps.engine.claimById(user.orgId, user.id, task.id);
+            if (claimed) {
+              await deps.engine
+                .runClaimed(claimed, { budgetMs: Math.min(20_000, deps.config.maxRunMs) })
+                .catch(() => undefined);
+            }
+            current =
+              (await deps.database.withTenant(user.orgId, user.id, (conn) =>
+                getTask(conn, task.id),
+              )) ?? current;
+          }
+          return {
+            taskId: current.id,
+            status: current.status,
+            progress: current.progress,
+            error: current.error,
+            result: current.status === "succeeded" ? compactTaskResult(current.result) : null,
+            steps: plan.steps.map((s) => s.title),
+          };
         },
       },
       {
@@ -825,6 +880,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
           return { memoryId: memory.id };
         },
       },
+      ...webTools({ config: deps.config, browserFactory }),
       ...calendarTools({
         google,
         store: credentialStore,
@@ -875,6 +931,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
                     approval_id?: string;
                     summary?: string;
                     expires_at?: string;
+                    taskId?: string;
+                    progress?: number;
                   }
                 | null;
               if (
@@ -891,9 +949,22 @@ export function createApp(deps: AppDeps): Hono<Env> {
                   }),
                 });
               }
+              const task =
+                result && typeof result.taskId === "string"
+                  ? {
+                      id: result.taskId,
+                      status: String(result.status ?? "queued"),
+                      progress: Number(result.progress ?? 0),
+                    }
+                  : undefined;
               await stream.writeSSE({
                 event: "tool",
-                data: JSON.stringify({ phase: "end", name: event.name, ok: event.ok }),
+                data: JSON.stringify({
+                  phase: "end",
+                  name: event.name,
+                  ok: event.ok,
+                  ...(task ? { task } : {}),
+                }),
               });
             }
           },
