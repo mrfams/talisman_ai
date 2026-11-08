@@ -4,7 +4,8 @@ on:
   schedule:
     # GitHub's shortest supported interval. Vercel Hobby cron is daily-only, so
     # this authenticated tick is what keeps recurring schedules near their time.
-    - cron: "*/5 * * * *"
+    # Offset from :00 because GitHub drops or delays high-load minute boundaries.
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
   workflow_dispatch:
 
 permissions:
