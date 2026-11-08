@@ -12,6 +12,7 @@ import {
   appendEvent,
   createConversation,
   createMemory,
+  createNotification,
   createSchedule,
   createTask,
   decideApproval,
@@ -222,6 +223,25 @@ function audit(
       payload,
     }),
   );
+}
+
+async function notifyPhoneApproval(
+  deps: AppDeps,
+  session: SessionInfo,
+  approval: { id: string; summary: string; deviceId: string },
+): Promise<void> {
+  await deps.database
+    .withTenant(session.user.orgId, session.user.id, (conn) =>
+      createNotification(conn, {
+        orgId: session.user.orgId,
+        userId: session.user.id,
+        kind: "phone.approval",
+        title: "Phone plan needs approval",
+        body: approval.summary,
+        data: { approvalId: approval.id, deviceId: approval.deviceId },
+      }),
+    )
+    .catch(() => undefined);
 }
 
 function startSession(c: AppContext, deps: AppDeps, token: string): void {
@@ -571,6 +591,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       op: body.op,
       approvalId: approval.id,
     });
+    await notifyPhoneApproval(deps, { user, expiresAt: "" }, approval);
     return c.json({ approval }, 201);
   });
 
@@ -1001,6 +1022,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
                 companionDevice.id,
                 input,
               );
+              await notifyPhoneApproval(deps, { user, expiresAt: "" }, requested);
               return {
                 approvalId: requested.id,
                 summary: requested.summary,
@@ -1328,12 +1350,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!deps.engine) throw errors.unavailable("This deployment has no executor");
     const startedAt = Date.now();
     const budget = deps.config.maxRunMs;
-    const scheduled = await runDueSchedules(deps.database).catch((error) => {
-      log.warn("scheduled dispatch failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    });
+    let scheduled: Awaited<ReturnType<typeof runDueSchedules>> = [];
+    let scheduleError: string | null = null;
+    try {
+      scheduled = await runDueSchedules(deps.database);
+    } catch (error) {
+      scheduleError = error instanceof Error ? error.message : String(error);
+      log.error("scheduled dispatch failed", { error: scheduleError });
+    }
     const results: Array<{ taskId: string; outcome: string }> = [];
     const orgIds = await listOrgIds(deps.database.driver);
     for (const orgId of orgIds) {
@@ -1346,14 +1370,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
         results.push({ taskId: task.id, outcome });
       }
     }
-    return c.json({
-      ok: true,
+    const response = {
+      ok: scheduleError === null,
       ran: results.length,
       scheduled: scheduled.length,
       scheduledTasks: scheduled,
       results,
       durationMs: Date.now() - startedAt,
-    });
+      ...(scheduleError ? { error: `Scheduler dispatch failed: ${scheduleError}` } : {}),
+    };
+    // A scheduler failure must fail the external trigger, otherwise a broken
+    // dispatch looks like a healthy tick forever.
+    return c.json(response, scheduleError ? 503 : 200);
   });
 
   /* ----------------------------------------------------------- approvals */
@@ -1688,7 +1716,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       embedder,
       orgId: user.orgId,
       userId: user.id,
-      limit: 50,
+      limit: 20,
     });
     return c.json({ updated, model: embedder.model });
   });

@@ -297,7 +297,8 @@ function NotificationBell() {
   function openItem(item: AppNotification) {
     if (!item.readAt) readOne.mutate(item.id);
     setOpen(false);
-    if (item.data?.taskId) navigate(`/tasks/${item.data.taskId}`);
+    if (item.kind.startsWith("phone.")) navigate("/devices");
+    else if (item.data?.taskId) navigate(`/tasks/${item.data.taskId}`);
     else if (item.kind === "approval.pending") navigate("/approvals");
   }
 

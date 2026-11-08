@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   Clock3,
   Pause,
   Phone,
@@ -10,6 +11,7 @@ import {
   Trash2,
   Wifi,
   WifiOff,
+  X,
 } from "lucide-react";
 import {
   api,
@@ -77,6 +79,148 @@ function statusLabel(device: PhoneDevice): string {
   if (device.status === "revoked") return "Revoked";
   if (device.status === "paused") return "Paused";
   return device.online ? "Online" : "Waiting";
+}
+
+function planPreview(approval: PhoneApproval): string[] {
+  const raw = approval.args.steps;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return "";
+      const step = entry as Record<string, unknown>;
+      const wait =
+        step.wait_for && typeof step.wait_for === "object"
+          ? String((step.wait_for as Record<string, unknown>).text ?? "").trim()
+          : "";
+      const then =
+        step.then && typeof step.then === "object"
+          ? (step.then as Record<string, unknown>)
+          : null;
+      if (!then) return "";
+      const action = String(then.action ?? "");
+      const label =
+        action === "tap_text"
+          ? `tap “${String(then.text ?? "")}”`
+          : action === "tap"
+            ? `tap (${String(then.x ?? 0)}, ${String(then.y ?? 0)})`
+            : action === "global"
+              ? `press ${String(then.name ?? "")}`
+              : action === "none"
+                ? "continue"
+                : action;
+      return `${wait ? `wait for “${wait}” then ` : ""}${label}`;
+    })
+    .filter(Boolean);
+}
+
+function PendingPhoneApprovals({ devices }: { devices: PhoneDevice[] }) {
+  const client = useQueryClient();
+  const [note, setNote] = useState<{ tone: "neutral" | "warn" | "bad"; text: string } | null>(null);
+  const query = useQuery({
+    queryKey: ["phone-approvals"],
+    queryFn: () => api.phoneApprovals("pending"),
+    refetchInterval: 5_000,
+  });
+  const decide = useMutation({
+    mutationFn: (input: { id: string; decision: "approved" | "denied" }) =>
+      api.decidePhoneApproval(input.id, input.decision),
+    onSuccess: async (result, input) => {
+      await client.invalidateQueries({ queryKey: ["phone-approvals"] });
+      await client.invalidateQueries({ queryKey: ["devices"] });
+      await client.invalidateQueries({ queryKey: ["notifications"] });
+      if (input.decision === "denied") {
+        setNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
+      } else if (result.command?.status === "done") {
+        setNote({ tone: "neutral", text: "The phone completed the approved plan." });
+      } else if (result.command?.status === "error") {
+        setNote({
+          tone: "bad",
+          text: `The phone rejected the plan: ${result.command.error ?? "unknown error"}`,
+        });
+      } else {
+        setNote({ tone: "warn", text: "Approved and queued. Keep the companion open." });
+      }
+    },
+    onError: (error) => setNote({ tone: "bad", text: errorMessage(error) }),
+  });
+
+  const approvals = query.data?.approvals ?? [];
+  if (!query.isLoading && approvals.length === 0) return null;
+
+  return (
+    <Card flush>
+      <div className="card-head">
+        <div className="row" style={{ gap: 9, minWidth: 0 }}>
+          <span className="provider-icon" style={{ width: 30, height: 30 }}>
+            <ShieldCheck size={14} />
+          </span>
+          <div>
+            <div className="provider-name">Phone approvals</div>
+            <div className="tiny faint">One approval covers the exact plan below.</div>
+          </div>
+        </div>
+        {approvals.length ? <Badge tone="warn">{approvals.length} waiting</Badge> : null}
+      </div>
+      <div className="card-body stack" style={{ gap: 10 }}>
+        {note ? <Notice tone={note.tone}>{note.text}</Notice> : null}
+        {query.isLoading ? <Skeleton h={70} /> : null}
+        {approvals.map((approval) => {
+          const device = devices.find((item) => item.id === approval.deviceId);
+          const plan = planPreview(approval);
+          return (
+            <div key={approval.id} className="panel" style={{ padding: 12 }}>
+              <div className="row-between wrap" style={{ gap: 10, alignItems: "flex-start" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="small" style={{ fontWeight: 600 }}>
+                    {approval.summary}
+                  </div>
+                  <div className="tiny faint" style={{ marginTop: 3 }}>
+                    {device?.name ?? "Paired phone"} · expires{" "}
+                    {new Date(approval.expiresAt).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </div>
+                  {plan.length ? (
+                    <ol className="plan-list">
+                      {plan.map((step, index) => (
+                        <li key={`${approval.id}-${index}`}>{step}</li>
+                      ))}
+                    </ol>
+                  ) : null}
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<Check size={12} />}
+                    busy={decide.isPending}
+                    onClick={() => {
+                      setNote(null);
+                      decide.mutate({ id: approval.id, decision: "approved" });
+                    }}
+                  >
+                    Allow once
+                  </Button>
+                  <Button
+                    size="sm"
+                    icon={<X size={12} />}
+                    busy={decide.isPending}
+                    onClick={() => {
+                      setNote(null);
+                      decide.mutate({ id: approval.id, decision: "denied" });
+                    }}
+                  >
+                    Refuse
+                  </Button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
 function PairPanel({ onClose }: { onClose?: () => void }) {
@@ -710,6 +854,8 @@ export function Devices() {
         <Notice tone="bad">{errorMessage(query.error)}</Notice>
       ) : (
         <>
+          <PendingPhoneApprovals devices={devices} />
+
           {devices.length === 0 || pairingOpen ? (
             <PairPanel onClose={devices.length ? () => setPairingOpen(false) : undefined} />
           ) : null}

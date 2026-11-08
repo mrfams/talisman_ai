@@ -5,7 +5,59 @@ import { createApp } from "../src/api/app.js";
 import { ArtifactStore } from "../src/workspace/workspace.js";
 import { ModelRouter } from "../src/intelligence/router.js";
 import { MockProvider } from "../src/intelligence/providers/mock.js";
-import { createNotification, listTasks } from "../src/db/repos.js";
+import { createMemory, createNotification, listMemories, listTasks } from "../src/db/repos.js";
+import { backfillMemoryEmbeddings } from "../src/intelligence/embedding.js";
+
+test("memory backfill embeds missing rows and is idempotent", async () => {
+  const database = await makeDatabase();
+  const { user } = await makeUser(database);
+  try {
+    for (let index = 0; index < 4; index += 1) {
+      await database.withTenant(user.orgId, user.id, (conn) =>
+        createMemory(conn, {
+          orgId: user.orgId,
+          userId: user.id,
+          kind: "fact",
+          content: `Memory number ${index}`,
+          source: "test",
+        }),
+      );
+    }
+    let calls = 0;
+    const embedder = {
+      model: "test-embedding",
+      embed: async () => {
+        calls += 1;
+        return [1, 0, 0];
+      },
+    };
+    const updated = await backfillMemoryEmbeddings({
+      database,
+      embedder,
+      orgId: user.orgId,
+      userId: user.id,
+      limit: 10,
+    });
+    assert.equal(updated, 4);
+    assert.equal(calls, 4);
+    const memories = await database.withTenant(user.orgId, user.id, (conn) =>
+      listMemories(conn, user.orgId, user.id),
+    );
+    assert.ok(memories.every((memory) => memory.embedding?.length === 3));
+    assert.ok(memories.every((memory) => memory.embeddingModel === "test-embedding"));
+
+    const second = await backfillMemoryEmbeddings({
+      database,
+      embedder,
+      orgId: user.orgId,
+      userId: user.id,
+      limit: 10,
+    });
+    assert.equal(second, 0);
+  } finally {
+    await database.close();
+  }
+});
 
 test("profile, memory, schedules and notifications are tenant-scoped API features", async () => {
   const database = await makeDatabase();

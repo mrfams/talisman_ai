@@ -114,7 +114,7 @@ export function selectMemoriesSemantic(
 /**
  * Lazily embed the newest unembedded memories. Called from chat so old rows are
  * upgraded without a migration that needs an external API, and bounded so one
- * message never embeds an entire history.
+ * message never embeds an entire history. Batches are concurrent but bounded.
  */
 export async function backfillMemoryEmbeddings(input: {
   database: Database;
@@ -127,16 +127,25 @@ export async function backfillMemoryEmbeddings(input: {
     listMemoriesMissingEmbeddings(conn, input.orgId, input.userId, input.limit ?? 3),
   );
   let updated = 0;
-  for (const memory of memories) {
-    try {
-      const vector = await input.embedder.embed(memory.content);
-      await input.database.withTenant(input.orgId, input.userId, (conn) =>
-        updateMemoryEmbedding(conn, memory.id, input.userId, vector, input.embedder.model),
-      );
-      updated += 1;
-    } catch {
-      // A provider outage must not block the conversation.
-    }
+  // Four concurrent provider calls keep an explicit index inside a serverless
+  // request budget without flooding the embedding endpoint.
+  for (let index = 0; index < memories.length; index += 4) {
+    const batch = memories.slice(index, index + 4);
+    const outcomes = await Promise.all(
+      batch.map(async (memory) => {
+        try {
+          const vector = await input.embedder.embed(memory.content);
+          await input.database.withTenant(input.orgId, input.userId, (conn) =>
+            updateMemoryEmbedding(conn, memory.id, input.userId, vector, input.embedder.model),
+          );
+          return true;
+        } catch {
+          // A provider outage must not block the conversation or the rest of the batch.
+          return false;
+        }
+      }),
+    );
+    updated += outcomes.filter(Boolean).length;
   }
   return updated;
 }
