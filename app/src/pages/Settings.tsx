@@ -200,8 +200,9 @@ export function Settings() {
                     <div style={{ marginTop: 10 }}>
                       <Notice tone="warn">
                         No model provider is configured, so chat cannot answer. Set{" "}
-                        <span className="mono">OPENAI_API_KEY</span> (or Anthropic) on the
-                        deployment.
+                        <span className="mono">OPENAI_API_KEY</span>,{" "}
+                        <span className="mono">GEMINI_API_KEY</span>, or{" "}
+                        <span className="mono">ANTHROPIC_API_KEY</span> on the deployment.
                       </Notice>
                     </div>
                   ) : null}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clock3,
@@ -217,9 +217,15 @@ function PhoneActions({ device, onDone }: { device: PhoneDevice; onDone: () => v
     text: string;
   } | null>(null);
 
-  async function loadApps() {
-    setBusy("apps");
-    setNote(null);
+  const appsLoading = useRef(false);
+
+  async function loadApps(quiet = false) {
+    if (appsLoading.current) return;
+    appsLoading.current = true;
+    if (!quiet) {
+      setBusy("apps");
+      setNote(null);
+    }
     try {
       const response = await api.companionOp(device.id, "apps");
       const result = response.result as { apps?: Array<{ package?: string; label?: string }> };
@@ -228,13 +234,23 @@ function PhoneActions({ device, onDone }: { device: PhoneDevice; onDone: () => v
         .map((app) => ({ package: app.package, label: app.label || app.package }))
         .sort((a, b) => a.label.localeCompare(b.label));
       setApps(found);
-      if (!found.length) setNote({ tone: "warn", text: "The phone returned no installed apps." });
+      if (!found.length && !quiet) {
+        setNote({ tone: "warn", text: "The phone returned no installed apps." });
+      }
     } catch (error) {
       setNote({ tone: "bad", text: errorMessage(error) });
     } finally {
-      setBusy(null);
+      appsLoading.current = false;
+      if (!quiet) setBusy(null);
     }
   }
+
+  // Apps change rarely, but the list should already be there when the page opens.
+  useEffect(() => {
+    if (!device.online || apps !== null) return;
+    void loadApps(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [device.online]);
 
   async function request(args: Record<string, unknown>) {
     setBusy("request");
@@ -383,8 +399,12 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
   const [revision, setRevision] = useState(0);
   const [frameOk, setFrameOk] = useState(true);
   const [looking, setLooking] = useState(false);
+  const [live, setLive] = useState(true);
+  const [syncedAt, setSyncedAt] = useState<string | null>(null);
   const [managing, setManaging] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const observing = useRef(false);
+  const mounted = useRef(true);
 
   const diagnostics = device.diagnostics;
   const battery =
@@ -394,20 +414,55 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
   const screen = typeof diagnostics.screen === "string" ? diagnostics.screen : null;
   const locked = typeof diagnostics.locked === "boolean" ? diagnostics.locked : null;
 
-  async function look() {
-    setLooking(true);
-    setProblem(null);
-    try {
-      const response = await api.companionOp(device.id, "observe", { screenshot: true });
-      setBoxes(boxesFrom(response.result));
-      setFrameOk(true);
-      setRevision(Date.now());
-    } catch (error) {
-      setProblem(errorMessage(error));
-    } finally {
-      setLooking(false);
-    }
-  }
+  const observe = useCallback(
+    async (manual: boolean) => {
+      if (observing.current) return;
+      observing.current = true;
+      if (manual) setLooking(true);
+      try {
+        const response = await api.companionOp(device.id, "observe", { screenshot: true });
+        if (!mounted.current) return;
+        setBoxes(boxesFrom(response.result));
+        setFrameOk(true);
+        setRevision(Date.now());
+        setSyncedAt(new Date().toISOString());
+        setProblem(null);
+      } catch (error) {
+        if (!mounted.current) return;
+        setProblem(errorMessage(error));
+        // A locked screen or a sleeping phone must not spin the live loop forever.
+        if (!manual) setLive(false);
+      } finally {
+        observing.current = false;
+        if (manual && mounted.current) setLooking(false);
+      }
+    },
+    [device.id],
+  );
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Live view: observe sequentially, so a slow phone never builds a backlog.
+  useEffect(() => {
+    if (!device.online || !live) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState === "visible") await observe(false);
+      if (!cancelled) timer = setTimeout(tick, 2_500);
+    };
+    timer = setTimeout(tick, 400);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [device.online, live, observe]);
 
   async function manage(action: "pause" | "resume" | "revoke") {
     if (
@@ -452,12 +507,21 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
             {device.online ? <Wifi size={11} /> : <WifiOff size={11} />}{" "}
             {device.online ? "Connected" : "No heartbeat"}
           </Badge>
+          {live && device.online ? <Badge tone="live">Live</Badge> : null}
+          <Button
+            size="sm"
+            icon={live ? <Pause size={12} /> : <Play size={12} />}
+            disabled={!device.online}
+            onClick={() => setLive((current) => !current)}
+          >
+            {live ? "Pause live" : "Go live"}
+          </Button>
           <Button
             size="sm"
             icon={<RefreshCw size={12} />}
             busy={looking}
             disabled={!device.online}
-            onClick={() => void look()}
+            onClick={() => void observe(true)}
           >
             Look
           </Button>
@@ -471,6 +535,7 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
           <span className="tiny faint row" style={{ gap: 5 }}>
             <Clock3 size={12} /> Seen {timeAgo(device.lastSeenAt)}
           </span>
+          {syncedAt ? <span className="tiny faint">Frame {timeAgo(syncedAt)}</span> : null}
           {battery ? <span className="tiny faint">Battery {battery}</span> : null}
           {screen ? <span className="tiny faint">Screen {screen}</span> : null}
           {locked === true ? <span className="tiny faint">Locked</span> : null}
@@ -507,15 +572,17 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
                   <Phone size={18} className="faint" />
                   <p className="tiny muted" style={{ maxWidth: 210, lineHeight: 1.5 }}>
                     {device.online
-                      ? "No frame yet. Press Look to ask the phone for its current screen."
+                      ? live
+                        ? "Waiting for the first live frame from the phone."
+                        : "Live view is paused. Press Go live or Look to read the screen again."
                       : "The phone is not sending heartbeats. Open Talisman Companion on the phone."}
                   </p>
                 </div>
               </div>
             )}
             <p className="tiny faint" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              The frame is uploaded by the phone after a read-only observation. It is never cached
-              by the browser.
+              The frame is uploaded by the phone after a read-only observation and refreshes while
+              Live is on. It is never cached by the browser.
             </p>
           </div>
 
@@ -555,7 +622,7 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
           </div>
         </div>
 
-        <PhoneActions device={device} onDone={() => void look()} />
+        <PhoneActions device={device} onDone={() => void observe(true)} />
 
         <div className="row wrap" style={{ gap: 8, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
           {device.status === "active" ? (

@@ -21,6 +21,9 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().default("https://api.openai.com/v1"),
   ANTHROPIC_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_BASE_URL: z.string().default("https://generativelanguage.googleapis.com/v1beta/openai"),
+  GEMINI_MODEL: z.string().default("gemini-2.5-flash"),
   DEFAULT_MODEL: z.string().default("gpt-4.1-mini"),
   MODEL_FALLBACKS: z.string().default(""),
   TALISMAN_SEARCH_PROVIDER: z.enum(["searxng", "apinex"]).default("searxng"),
@@ -69,6 +72,9 @@ export interface Config {
   openaiApiKey: string | null;
   openaiBaseUrl: string;
   anthropicApiKey: string | null;
+  geminiApiKey: string | null;
+  geminiBaseUrl: string;
+  geminiModel: string;
   defaultModel: string;
   modelFallbacks: string[];
   searchProvider: "searxng" | "apinex";
@@ -126,6 +132,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ? !serverless
       : ["1", "true", "yes", "on"].includes(parsed.TALISMAN_AUTO_MIGRATE.toLowerCase());
 
+  // Direct Gemini is tried before gateway fallbacks. A free gateway can be
+  // unavailable (quota, check-in, outage); a direct provider keeps chat alive.
+  const modelFallbacks = [
+    ...(parsed.GEMINI_API_KEY ? [parsed.GEMINI_MODEL.trim()] : []),
+    ...parsed.MODEL_FALLBACKS.split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+  ].filter((entry, index, all) => Boolean(entry) && all.indexOf(entry) === index);
+
   return {
     nodeEnv: parsed.NODE_ENV,
     production,
@@ -140,10 +155,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     openaiApiKey: parsed.OPENAI_API_KEY ?? null,
     openaiBaseUrl: parsed.OPENAI_BASE_URL,
     anthropicApiKey: parsed.ANTHROPIC_API_KEY ?? null,
+    geminiApiKey: parsed.GEMINI_API_KEY ?? null,
+    geminiBaseUrl: parsed.GEMINI_BASE_URL,
+    geminiModel: parsed.GEMINI_MODEL,
     defaultModel: parsed.DEFAULT_MODEL,
-    modelFallbacks: parsed.MODEL_FALLBACKS.split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean),
+    modelFallbacks,
     searchProvider: parsed.TALISMAN_SEARCH_PROVIDER,
     searchUrl: parsed.TALISMAN_SEARCH_URL ?? null,
     searchApiKey: parsed.TALISMAN_SEARCH_API_KEY ?? parsed.OPENAI_API_KEY ?? null,

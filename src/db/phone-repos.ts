@@ -550,7 +550,18 @@ export async function completeCommand(
       input.durationMs,
     ],
   );
-  if (rows[0]) return { updated: true, command: mapCommand(rows[0]) };
+  if (rows[0]) {
+    // Live view produces one observe every few seconds. Keep recent results for
+    // the waiting request, but do not let read-only rows grow without bound.
+    await conn.query(
+      `DELETE FROM phone_commands
+        WHERE device_id = $1 AND op = 'observe'
+          AND status IN ('done', 'error', 'expired', 'cancelled')
+          AND COALESCE(completed_at, created_at) < now() - interval '10 minutes'`,
+      [deviceId],
+    );
+    return { updated: true, command: mapCommand(rows[0]) };
+  }
   return { updated: false, command: await getCommand(conn, commandId, deviceId) };
 }
 

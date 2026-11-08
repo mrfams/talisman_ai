@@ -12,16 +12,19 @@ export interface OpenAIProviderOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   supports?: (model: string) => boolean;
+  /** Provider label in errors and routing diagnostics. */
+  id?: string;
 }
 
-/** Works with OpenAI and any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter). */
+/** Works with OpenAI and any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter, Gemini). */
 export class OpenAICompatibleProvider implements ModelProvider {
-  readonly id = "openai-compatible";
+  readonly id: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly supports: (model: string) => boolean;
 
   constructor(private readonly options: OpenAIProviderOptions) {
+    this.id = options.id ?? "openai-compatible";
     this.baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.supports = options.supports ?? (() => true);
@@ -69,7 +72,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
       );
     }
 
-    const pending = new Map<number, { id: string; name: string; args: string }>();
+    const pending = new Map<string, { id: string; name: string; args: string; order: number }>();
+    let toolOrder = 0;
     let finishReason = "stop";
     let inputTokens = 0;
     let outputTokens = 0;
@@ -101,16 +105,19 @@ export class OpenAICompatibleProvider implements ModelProvider {
         yield { type: "text_delta", text: delta.content };
       }
       for (const call of (delta.tool_calls ?? []) as OpenAIToolCallDelta[]) {
-        const index = call.index ?? 0;
-        const current = pending.get(index) ?? { id: "", name: "", args: "" };
+        // OpenAI sends a stable index. Gemini may omit it, especially for
+        // parallel calls, so fall back to the call id instead of merging them.
+        const key =
+          call.index !== undefined ? `index:${call.index}` : call.id ? `id:${call.id}` : `anon:${toolOrder}`;
+        const current = pending.get(key) ?? { id: "", name: "", args: "", order: toolOrder++ };
         if (call.id) current.id = call.id;
         if (call.function?.name) current.name += call.function.name;
         if (call.function?.arguments) current.args += call.function.arguments;
-        pending.set(index, current);
+        pending.set(key, current);
       }
     }
 
-    for (const [, call] of [...pending.entries()].sort(([a], [b]) => a - b)) {
+    for (const call of [...pending.values()].sort((a, b) => a.order - b.order)) {
       if (!call.name) continue;
       yield {
         type: "tool_call",

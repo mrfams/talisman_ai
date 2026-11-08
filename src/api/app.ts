@@ -457,9 +457,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     }
     const device = await phoneService.get(user.orgId, user.id, id);
     const result = await phoneService.execute(device, body.op, body.args, 45_000);
-    await audit(deps, { user, expiresAt: "" }, "phone.inspect", "phone", id, {
-      op: body.op,
-    });
+    // Live view observes every few seconds; auditing each frame would bury the
+    // real actions in thousands of read-only rows.
+    if (body.op !== "observe") {
+      await audit(deps, { user, expiresAt: "" }, "phone.inspect", "phone", id, {
+        op: body.op,
+      });
+    }
     return c.json({ result });
   });
 
@@ -708,7 +712,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
     );
     if (!conversation) throw errors.notFound("Conversation not found");
     if (deps.models.candidates().length === 0) {
-      throw errors.unavailable("No model provider is configured. Set OPENAI_API_KEY or ANTHROPIC_API_KEY.");
+      throw errors.unavailable(
+        "No model provider is configured. Set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY.",
+      );
     }
 
     await deps.database.withTenant(user.orgId, user.id, async (conn) => {
@@ -738,10 +744,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
       .catch(() => null);
     const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
     const phoneContext = companionDevice
-      ? ` A paired Android phone named "${companionDevice.name}" is connected. Use phone_look before acting. phone_tap_text, phone_type, phone_open_app, and phone_home only create an approval card; no action runs until the user approves it. Never say a phone action succeeded until the tool returns an executed result.`
+      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly: call phone_look first, then phone_tap_text, phone_type, phone_open_app, or phone_home. Do not use create_task for phone control. Those action tools only create an approval card; no action runs until the user presses Allow once. Never say a phone action succeeded until the user confirms it or a tool returns an executed result.`
       : "";
     const messages = buildContext({
-      system: `You are Talisman, a personal AI agent. You can create durable tasks that run in a real browser, and remember facts the user shares. Use tools when the user asks for work that should continue in the background.${phoneContext}`,
+      system: `You are Talisman, a personal AI agent. You can create durable tasks that run in a real browser, and remember facts the user shares. Use tools when the user asks for work that should continue in the background. Research, browsing, and documents can become background tasks. Phone control must use the phone tools immediately, because the phone approval is one-shot and interactive.${phoneContext}`,
       memories: selectMemories(memories, body.content),
       history: chatHistory,
       budgetTokens: 24_000,
@@ -751,7 +757,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         definition: {
           name: "create_task",
           description:
-            "Create a durable background task. Use for research, browsing, documents, or anything multi-step.",
+            "Create a durable background task for research, browsing, or documents. Never use this for phone control; phone actions must call the phone tools directly.",
           parameters: {
             type: "object",
             properties: {

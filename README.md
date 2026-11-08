@@ -23,8 +23,8 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
   transactions switch to a non-superuser role so policies actually apply, and the
   migration grants that role so this also works on a managed Postgres where the
   owner is not a superuser.
-- Talisman-owned model layer: OpenAI-compatible and Anthropic streaming, model
-  routing with fallbacks, a provider-neutral tool-call agent loop, context
+- Talisman-owned model layer: OpenAI-compatible, Gemini and Anthropic streaming,
+  model routing with fallbacks, a provider-neutral tool-call agent loop, context
   budgeting and memory injection.
 - Durable tasks: plans, steps, progress, events, pause/resume/cancel/retry,
   approvals with a default-deny gate, leases, heartbeats and receipts.

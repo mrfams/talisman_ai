@@ -6,6 +6,8 @@ import { OpenAICompatibleProvider } from "../src/intelligence/providers/openai.j
 import { AnthropicProvider } from "../src/intelligence/providers/anthropic.js";
 import { MockProvider } from "../src/intelligence/providers/mock.js";
 import { ModelRouter } from "../src/intelligence/router.js";
+import { createModelRouter } from "../src/intelligence/factory.js";
+import type { Config } from "../src/core/config.js";
 import { Agent, type AgentTool } from "../src/intelligence/agent.js";
 import { buildContext, selectMemories } from "../src/intelligence/context.js";
 import type { ModelEvent } from "../src/intelligence/types.js";
@@ -103,6 +105,26 @@ test("Anthropic provider converts tool_use blocks", async () => {
   } finally {
     server.close();
   }
+});
+
+test("direct Gemini is a distinct provider and is tried before gateway fallbacks", async () => {
+  const config = {
+    openaiApiKey: "gateway-key",
+    openaiBaseUrl: "https://gateway.test/v1",
+    geminiApiKey: "gemini-key",
+    geminiBaseUrl: "https://gemini.test/v1beta/openai",
+    geminiModel: "gemini-2.5-flash",
+    anthropicApiKey: null,
+    defaultModel: "free/gpt-6-luna",
+    // loadConfig puts direct Gemini before the configured gateway fallbacks.
+    modelFallbacks: ["gemini-2.5-flash", "free/gemini-3.8-flash"],
+  } as unknown as Config;
+  const router = createModelRouter(config);
+  const candidates = router.candidates("");
+  assert.equal(candidates[0]?.provider.id, "openai-compatible");
+  assert.equal(candidates[1]?.provider.id, "gemini");
+  assert.equal(candidates[1]?.model, "gemini-2.5-flash");
+  assert.equal(candidates[2]?.provider.id, "openai-compatible");
 });
 
 test("router falls back before emitting anything and honours an allowlist", async () => {
