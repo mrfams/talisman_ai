@@ -10,6 +10,7 @@ import { createModelRouter } from "../src/intelligence/factory.js";
 import type { Config } from "../src/core/config.js";
 import { Agent, type AgentTool } from "../src/intelligence/agent.js";
 import { buildContext, selectMemories } from "../src/intelligence/context.js";
+import { cosineSimilarity, selectMemoriesSemantic } from "../src/intelligence/embedding.js";
 import type { ModelEvent } from "../src/intelligence/types.js";
 
 async function fakeServer(handler: (body: string) => string): Promise<{ server: Server; url: string }> {
@@ -190,6 +191,45 @@ test("agent executes tools and enforces approval, default deny", async () => {
   });
   assert.equal(executed, 1);
   assert.equal(allowed.result.text, "finished");
+});
+
+test("semantic memory ranks by meaning and falls back to keywords", () => {
+  assert.equal(cosineSimilarity([1, 0], [1, 0]), 1);
+  const memories = [
+    {
+      id: "a",
+      orgId: "o",
+      userId: "u",
+      kind: "preference",
+      content: "Prefers a short brief before 9am.",
+      source: null,
+      embedding: [1, 0, 0],
+      embeddingModel: "test",
+      createdAt: "",
+      updatedAt: "",
+    },
+    {
+      id: "b",
+      orgId: "o",
+      userId: "u",
+      kind: "fact",
+      content: "Lives in Lisbon.",
+      source: null,
+      embedding: [0, 1, 0],
+      embeddingModel: "test",
+      createdAt: "",
+      updatedAt: "",
+    },
+  ];
+  const semantic = selectMemoriesSemantic(memories, "anything", [0.95, 0.05, 0]);
+  assert.equal(semantic[0]?.id, "a");
+
+  const fallback = selectMemoriesSemantic(
+    memories.map((memory) => ({ ...memory, embedding: null })),
+    "Where does the user live?",
+    null,
+  );
+  assert.equal(fallback[0]?.id, "b");
 });
 
 test("context keeps recent history and injects relevant memories", () => {

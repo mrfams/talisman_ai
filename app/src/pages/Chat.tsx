@@ -145,6 +145,7 @@ export function Chat() {
                 expiresAt: approval.expiresAt ?? new Date().toISOString(),
                 createdAt: new Date().toISOString(),
                 decidedAt: null,
+                plan: approval.plan ?? null,
               },
             ]);
           },
@@ -477,6 +478,13 @@ export function Chat() {
                         <div className="small" style={{ fontWeight: 600 }}>
                           {approval.summary}
                         </div>
+                        {approval.plan?.length ? (
+                          <ol className="plan-list">
+                            {approval.plan.map((step, index) => (
+                              <li key={`${approval.id}-${index}`}>{step}</li>
+                            ))}
+                          </ol>
+                        ) : null}
                         <div className="tiny faint" style={{ marginTop: 3 }}>
                           Phone approval · one action only · expires{" "}
                           {new Date(approval.expiresAt).toLocaleTimeString([], {

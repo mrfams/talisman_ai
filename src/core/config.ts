@@ -24,6 +24,7 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_BASE_URL: z.string().default("https://generativelanguage.googleapis.com/v1beta/openai"),
   GEMINI_MODEL: z.string().default("gemini-2.5-flash"),
+  GEMINI_EMBEDDING_MODEL: z.string().default("gemini-embedding-001"),
   DEFAULT_MODEL: z.string().default("gpt-4.1-mini"),
   MODEL_FALLBACKS: z.string().default(""),
   TALISMAN_SEARCH_PROVIDER: z.enum(["searxng", "apinex"]).default("searxng"),
@@ -75,6 +76,7 @@ export interface Config {
   geminiApiKey: string | null;
   geminiBaseUrl: string;
   geminiModel: string;
+  geminiEmbeddingModel: string;
   defaultModel: string;
   modelFallbacks: string[];
   searchProvider: "searxng" | "apinex";
@@ -158,6 +160,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     geminiApiKey: parsed.GEMINI_API_KEY ?? null,
     geminiBaseUrl: parsed.GEMINI_BASE_URL,
     geminiModel: parsed.GEMINI_MODEL,
+    geminiEmbeddingModel: parsed.GEMINI_EMBEDDING_MODEL,
     defaultModel: parsed.DEFAULT_MODEL,
     modelFallbacks,
     searchProvider: parsed.TALISMAN_SEARCH_PROVIDER,

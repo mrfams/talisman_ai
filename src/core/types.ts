@@ -173,8 +173,55 @@ export interface Memory {
   kind: string;
   content: string;
   source: string | null;
+  /** Optional dense vector used for semantic recall. */
+  embedding: number[] | null;
+  embeddingModel: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface UserProfile {
+  orgId: string;
+  userId: string;
+  displayName: string | null;
+  timezone: string;
+  locale: string;
+  preferences: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ScheduleKind = "interval" | "daily";
+
+export interface Schedule {
+  id: string;
+  orgId: string;
+  userId: string;
+  title: string;
+  goal: string;
+  kind: ScheduleKind;
+  intervalMinutes: number | null;
+  hour: number | null;
+  minute: number | null;
+  timezone: string;
+  enabled: boolean;
+  nextRunAt: string;
+  lastRunAt: string | null;
+  lastTaskId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Notification {
+  id: string;
+  orgId: string;
+  userId: string;
+  kind: string;
+  title: string;
+  body: string | null;
+  data: unknown;
+  readAt: string | null;
+  createdAt: string;
 }
 
 export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] = [

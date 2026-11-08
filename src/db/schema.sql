@@ -179,6 +179,57 @@ CREATE TABLE IF NOT EXISTS memories (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS memories_org_user_idx ON memories (org_id, user_id, updated_at DESC);
+-- Semantic recall. Embeddings are stored as JSON arrays so the same schema works
+-- on every Postgres, including the embedded test cluster (no pgvector needed).
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding jsonb;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_model text;
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  display_name text,
+  timezone text NOT NULL DEFAULT 'UTC',
+  locale text NOT NULL DEFAULT 'en',
+  preferences jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  goal text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('interval','daily')),
+  interval_minutes integer,
+  hour integer,
+  minute integer,
+  timezone text NOT NULL DEFAULT 'UTC',
+  enabled boolean NOT NULL DEFAULT true,
+  next_run_at timestamptz NOT NULL,
+  last_run_at timestamptz,
+  last_task_id text REFERENCES tasks(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS schedules_org_user_idx ON schedules (org_id, user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules (enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind text NOT NULL,
+  title text NOT NULL,
+  body text,
+  data jsonb,
+  read_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_org_user_idx
+  ON notifications (org_id, user_id, read_at, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS audit_events (
   id text PRIMARY KEY,
@@ -321,7 +372,8 @@ DECLARE
 BEGIN
   FOREACH t IN ARRAY ARRAY[
     'conversations','messages','tasks','task_steps','task_events',
-    'approvals','artifacts','artifact_blobs','memories','audit_events',
+    'approvals','artifacts','artifact_blobs','memories','user_profiles',
+    'schedules','notifications','audit_events',
     'provider_credentials','phone_approvals','phone_commands','phone_frames'
   ]
   LOOP

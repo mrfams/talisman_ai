@@ -43,22 +43,35 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
   tokens, `calendar_list_events` and `calendar_create_event` tools, and an
   approval gate on anything that writes to the user's calendar.
 - A real application at `/`: Today, streaming Chat, Runs and run detail,
-  Artifacts, Approvals, Connectors, Devices, Activity, Team and Settings, in light
-  and dark themes on desktop and mobile.
+  Artifacts, Approvals, Schedules, Connectors, Devices, Activity, Team and Settings,
+  in light and dark themes on desktop and mobile.
+- Recurring schedules: an interval or a daily wall-clock time in any IANA timezone.
+  Due schedules become ordinary durable runs and are claimed atomically, so two
+  overlapping cron invocations cannot double-run one schedule.
+- A notification inbox for finished runs, failures and pending approvals, with an
+  unread badge in the top bar.
+- Semantic memory: Gemini embeddings are stored with each memory and recall ranks
+  by cosine similarity; older memories are lazily backfilled and keyword overlap
+  remains the fallback when no embedding provider is configured. A persistent
+  profile carries the user's name, timezone, locale and preferences into chat.
 - Phone-hosted Android companion (forked from Claw Use, MIT): pair a sideloaded
   companion, queue `observe`/`act`/`flow`/`apps`/`status` commands, inspect the
   latest JPEG frame, pause or revoke a device, and keep the old Phone Harness
-  cloud/bridge transport as a compatibility adapter. See
+  cloud/bridge transport as a compatibility adapter. A `phone_plan` chat tool
+  submits up to six guarded steps under one approval; each step waits for expected
+  text and the flow stops instead of tapping a changed screen. Both browser and
+  chat actions are bound to the exact argument hash. See
   [`docs/PHONE-COMPANION-PROTOCOL.md`](docs/PHONE-COMPANION-PROTOCOL.md). Download
   the latest debug APK from [Releases](https://github.com/mrfams/talisman_ai/releases).
 - Unit/integration tests, a real-Chrome end-to-end test, a live deployment check,
   and CI.
 
 Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
-connectors, goals and monitors, semantic memory and AG-UI. The phone companion
-is not production-ready yet: a debug APK builds in CI, but it has not been
-exercised on a real phone, and phone actions still need approval-id binding
-plus a chat approval flow. See the protocol document for the exact boundary.
+connectors, goals and monitors, and AG-UI. The phone companion is not
+production-ready yet: a debug APK builds in CI, but physical execution has not
+been exercised on a real phone, and the on-device flow executor currently
+supports taps, waits and navigation rather than typing. See the protocol document
+for the exact boundary.
 
 ## Two ways to run it
 

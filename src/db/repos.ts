@@ -6,8 +6,11 @@ import type {
   Artifact,
   Conversation,
   Memory,
+  Notification,
   PlanStep,
   Role,
+  Schedule,
+  ScheduleKind,
   SessionInfo,
   StepStatus,
   StoredMessage,
@@ -18,6 +21,7 @@ import type {
   TaskStatus,
   TaskStep,
   User,
+  UserProfile,
 } from "../core/types.js";
 
 type Row = Record<string, unknown>;
@@ -746,6 +750,12 @@ export async function listArtifacts(conn: Conn, taskId: string): Promise<Artifac
 
 /* --------------------------------------------------------------- memories */
 
+function embeddingOf(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null;
+  const vector = value.map(Number).filter((entry) => Number.isFinite(entry));
+  return vector.length > 0 ? vector : null;
+}
+
 function mapMemory(row: Row): Memory {
   return {
     id: String(row.id),
@@ -754,6 +764,11 @@ function mapMemory(row: Row): Memory {
     kind: String(row.kind),
     content: String(row.content),
     source: row.source === null ? null : String(row.source),
+    embedding: embeddingOf(row.embedding),
+    embeddingModel:
+      row.embedding_model === null || row.embedding_model === undefined
+        ? null
+        : String(row.embedding_model),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -761,14 +776,380 @@ function mapMemory(row: Row): Memory {
 
 export async function createMemory(
   conn: Conn,
-  input: { orgId: string; userId: string; kind: string; content: string; source?: string | null },
+  input: {
+    orgId: string;
+    userId: string;
+    kind: string;
+    content: string;
+    source?: string | null;
+    embedding?: number[] | null;
+    embeddingModel?: string | null;
+  },
 ): Promise<Memory> {
   const { rows } = await conn.query<Row>(
-    `INSERT INTO memories (id, org_id, user_id, kind, content, source)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-    [newId(), input.orgId, input.userId, input.kind, input.content.slice(0, 4000), input.source ?? null],
+    `INSERT INTO memories (id, org_id, user_id, kind, content, source, embedding, embedding_model)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) RETURNING *`,
+    [
+      newId(),
+      input.orgId,
+      input.userId,
+      input.kind,
+      input.content.slice(0, 4000),
+      input.source ?? null,
+      input.embedding ? JSON.stringify(input.embedding) : null,
+      input.embeddingModel ?? null,
+    ],
   );
   return mapMemory(rows[0]!);
+}
+
+export async function updateMemoryEmbedding(
+  conn: Conn,
+  id: string,
+  userId: string,
+  embedding: number[],
+  model: string,
+): Promise<void> {
+  await conn.query(
+    "UPDATE memories SET embedding = $3::jsonb, embedding_model = $4, updated_at = now() WHERE id = $1 AND user_id = $2",
+    [id, userId, JSON.stringify(embedding), model],
+  );
+}
+
+export async function listMemoriesMissingEmbeddings(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+  limit = 20,
+): Promise<Memory[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT * FROM memories
+      WHERE org_id = $1 AND user_id = $2 AND embedding IS NULL
+      ORDER BY updated_at DESC LIMIT $3`,
+    [orgId, userId, limit],
+  );
+  return rows.map(mapMemory);
+}
+
+/* --------------------------------------------------------------- profile */
+
+function mapProfile(row: Row): UserProfile {
+  return {
+    orgId: String(row.org_id),
+    userId: String(row.user_id),
+    displayName: row.display_name === null ? null : String(row.display_name),
+    timezone: String(row.timezone),
+    locale: String(row.locale),
+    preferences:
+      row.preferences && typeof row.preferences === "object" && !Array.isArray(row.preferences)
+        ? (row.preferences as Record<string, unknown>)
+        : {},
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+export async function getProfile(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+): Promise<UserProfile | null> {
+  const { rows } = await conn.query<Row>(
+    "SELECT * FROM user_profiles WHERE org_id = $1 AND user_id = $2",
+    [orgId, userId],
+  );
+  return rows[0] ? mapProfile(rows[0]) : null;
+}
+
+export async function upsertProfile(
+  conn: Conn,
+  input: {
+    orgId: string;
+    userId: string;
+    displayName?: string | null;
+    timezone?: string;
+    locale?: string;
+    preferences?: Record<string, unknown>;
+  },
+): Promise<UserProfile> {
+  const { rows } = await conn.query<Row>(
+    `INSERT INTO user_profiles (org_id, user_id, display_name, timezone, locale, preferences)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+     ON CONFLICT (org_id, user_id) DO UPDATE SET
+       display_name = COALESCE(EXCLUDED.display_name, user_profiles.display_name),
+       timezone = EXCLUDED.timezone,
+       locale = EXCLUDED.locale,
+       preferences = EXCLUDED.preferences,
+       updated_at = now()
+     RETURNING *`,
+    [
+      input.orgId,
+      input.userId,
+      input.displayName ?? null,
+      input.timezone ?? "UTC",
+      input.locale ?? "en",
+      JSON.stringify(input.preferences ?? {}),
+    ],
+  );
+  return mapProfile(rows[0]!);
+}
+
+/* ------------------------------------------------------------- schedules */
+
+function mapSchedule(row: Row): Schedule {
+  return {
+    id: String(row.id),
+    orgId: String(row.org_id),
+    userId: String(row.user_id),
+    title: String(row.title),
+    goal: String(row.goal),
+    kind: row.kind as ScheduleKind,
+    intervalMinutes:
+      row.interval_minutes === null || row.interval_minutes === undefined
+        ? null
+        : Number(row.interval_minutes),
+    hour: row.hour === null || row.hour === undefined ? null : Number(row.hour),
+    minute: row.minute === null || row.minute === undefined ? null : Number(row.minute),
+    timezone: String(row.timezone),
+    enabled: Boolean(row.enabled),
+    nextRunAt: iso(row.next_run_at),
+    lastRunAt: isoOrNull(row.last_run_at),
+    lastTaskId: row.last_task_id === null ? null : String(row.last_task_id),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  };
+}
+
+export async function createSchedule(
+  conn: Conn,
+  input: {
+    id: string;
+    orgId: string;
+    userId: string;
+    title: string;
+    goal: string;
+    kind: ScheduleKind;
+    intervalMinutes?: number | null;
+    hour?: number | null;
+    minute?: number | null;
+    timezone: string;
+    enabled?: boolean;
+    nextRunAt: Date;
+  },
+): Promise<Schedule> {
+  const { rows } = await conn.query<Row>(
+    `INSERT INTO schedules
+       (id, org_id, user_id, title, goal, kind, interval_minutes, hour, minute, timezone, enabled, next_run_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING *`,
+    [
+      input.id,
+      input.orgId,
+      input.userId,
+      input.title.slice(0, 200),
+      input.goal.slice(0, 20_000),
+      input.kind,
+      input.intervalMinutes ?? null,
+      input.hour ?? null,
+      input.minute ?? null,
+      input.timezone,
+      input.enabled ?? true,
+      input.nextRunAt,
+    ],
+  );
+  return mapSchedule(rows[0]!);
+}
+
+export async function listSchedules(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+  limit = 100,
+): Promise<Schedule[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT * FROM schedules WHERE org_id = $1 AND user_id = $2
+      ORDER BY created_at DESC LIMIT $3`,
+    [orgId, userId, limit],
+  );
+  return rows.map(mapSchedule);
+}
+
+export async function getSchedule(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+): Promise<Schedule | null> {
+  const { rows } = await conn.query<Row>(
+    "SELECT * FROM schedules WHERE id = $1 AND org_id = $2 AND user_id = $3",
+    [id, orgId, userId],
+  );
+  return rows[0] ? mapSchedule(rows[0]) : null;
+}
+
+const SCHEDULE_COLUMNS: Record<string, string> = {
+  title: "title",
+  goal: "goal",
+  kind: "kind",
+  intervalMinutes: "interval_minutes",
+  hour: "hour",
+  minute: "minute",
+  timezone: "timezone",
+  enabled: "enabled",
+  nextRunAt: "next_run_at",
+  lastRunAt: "last_run_at",
+  lastTaskId: "last_task_id",
+};
+
+export async function updateSchedule(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+  patch: Record<string, unknown>,
+): Promise<Schedule | null> {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    const column = SCHEDULE_COLUMNS[key];
+    if (!column || value === undefined) continue;
+    values.push(value);
+    sets.push(`${column} = $${values.length}`);
+  }
+  if (sets.length === 0) return getSchedule(conn, id, orgId, userId);
+  values.push(id, orgId, userId);
+  const { rows } = await conn.query<Row>(
+    `UPDATE schedules SET ${sets.join(", ")}, updated_at = now()
+      WHERE id = $${values.length - 2} AND org_id = $${values.length - 1} AND user_id = $${values.length}
+      RETURNING *`,
+    values,
+  );
+  return rows[0] ? mapSchedule(rows[0]) : null;
+}
+
+export async function deleteSchedule(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+): Promise<boolean> {
+  const { rows } = await conn.query(
+    "DELETE FROM schedules WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING id",
+    [id, orgId, userId],
+  );
+  return rows.length > 0;
+}
+
+/** Locks due schedules for one organisation so concurrent ticks cannot duplicate a run. */
+export async function claimDueSchedules(
+  conn: Conn,
+  orgId: string,
+  limit = 20,
+): Promise<Schedule[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT * FROM schedules
+      WHERE org_id = $1 AND enabled = true AND next_run_at <= now()
+      ORDER BY next_run_at
+      FOR UPDATE SKIP LOCKED
+      LIMIT $2`,
+    [orgId, limit],
+  );
+  return rows.map(mapSchedule);
+}
+
+/* --------------------------------------------------------- notifications */
+
+function mapNotification(row: Row): Notification {
+  return {
+    id: String(row.id),
+    orgId: String(row.org_id),
+    userId: String(row.user_id),
+    kind: String(row.kind),
+    title: String(row.title),
+    body: row.body === null ? null : String(row.body),
+    data: row.data ?? null,
+    readAt: isoOrNull(row.read_at),
+    createdAt: iso(row.created_at),
+  };
+}
+
+export async function createNotification(
+  conn: Conn,
+  input: {
+    orgId: string;
+    userId: string;
+    kind: string;
+    title: string;
+    body?: string | null;
+    data?: unknown;
+  },
+): Promise<Notification> {
+  const { rows } = await conn.query<Row>(
+    `INSERT INTO notifications (id, org_id, user_id, kind, title, body, data)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING *`,
+    [
+      newId(),
+      input.orgId,
+      input.userId,
+      input.kind,
+      input.title.slice(0, 300),
+      input.body?.slice(0, 2000) ?? null,
+      input.data === undefined ? null : JSON.stringify(input.data),
+    ],
+  );
+  return mapNotification(rows[0]!);
+}
+
+export async function listNotifications(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+  limit = 50,
+): Promise<Notification[]> {
+  const { rows } = await conn.query<Row>(
+    `SELECT * FROM notifications WHERE org_id = $1 AND user_id = $2
+      ORDER BY created_at DESC LIMIT $3`,
+    [orgId, userId, limit],
+  );
+  return rows.map(mapNotification);
+}
+
+export async function unreadNotificationCount(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+): Promise<number> {
+  const { rows } = await conn.query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM notifications WHERE org_id = $1 AND user_id = $2 AND read_at IS NULL",
+    [orgId, userId],
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+export async function markNotificationRead(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+): Promise<Notification | null> {
+  const { rows } = await conn.query<Row>(
+    `UPDATE notifications SET read_at = COALESCE(read_at, now())
+      WHERE id = $1 AND org_id = $2 AND user_id = $3 RETURNING *`,
+    [id, orgId, userId],
+  );
+  return rows[0] ? mapNotification(rows[0]) : null;
+}
+
+export async function markAllNotificationsRead(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+): Promise<number> {
+  const { rows } = await conn.query<{ id: string }>(
+    "UPDATE notifications SET read_at = now() WHERE org_id = $1 AND user_id = $2 AND read_at IS NULL RETURNING id",
+    [orgId, userId],
+  );
+  return rows.length;
 }
 
 export async function listMemories(

@@ -181,6 +181,7 @@ export interface PhoneApproval {
   expiresAt: string;
   createdAt: string;
   decidedAt: string | null;
+  plan?: string[] | null;
 }
 
 export interface PhoneActionDecision {
@@ -216,6 +217,54 @@ export interface Connector {
 export interface ConnectorState {
   encryption: boolean;
   connectors: Connector[];
+}
+
+export interface Memory {
+  id: string;
+  kind: string;
+  content: string;
+  source: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserProfile {
+  orgId: string;
+  userId: string;
+  displayName: string | null;
+  timezone: string;
+  locale: string;
+  preferences: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ScheduleKind = "interval" | "daily";
+
+export interface Schedule {
+  id: string;
+  title: string;
+  goal: string;
+  kind: ScheduleKind;
+  intervalMinutes: number | null;
+  hour: number | null;
+  minute: number | null;
+  timezone: string;
+  enabled: boolean;
+  nextRunAt: string;
+  lastRunAt: string | null;
+  lastTaskId: string | null;
+  createdAt: string;
+}
+
+export interface AppNotification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string | null;
+  data: { taskId?: string; approvalId?: string; scheduleId?: string } | null;
+  readAt: string | null;
+  createdAt: string;
 }
 
 export interface Health {
@@ -362,6 +411,53 @@ export const api = {
       body: body({ decision }),
     }),
 
+  memories: () => request<{ memories: Memory[] }>("/api/memories"),
+  addMemory: (input: { content: string; kind?: string }) =>
+    request<{ memory: Memory }>("/api/memories", { method: "POST", body: body(input) }),
+  deleteMemory: (id: string) =>
+    request<{ ok: true }>(`/api/memories/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  embedMemories: () =>
+    request<{ updated: number; model: string }>("/api/memories/embed", { method: "POST" }),
+  profile: () =>
+    request<{ profile: UserProfile | null; user: { name: string | null; email: string } }>(
+      "/api/profile",
+    ),
+  updateProfile: (input: {
+    displayName?: string | null;
+    timezone?: string;
+    locale?: string;
+    preferences?: Record<string, unknown>;
+  }) =>
+    request<{ profile: UserProfile }>("/api/profile", { method: "PATCH", body: body(input) }),
+  schedules: () => request<{ schedules: Schedule[] }>("/api/schedules"),
+  createSchedule: (input: {
+    title: string;
+    goal: string;
+    kind: ScheduleKind;
+    intervalMinutes?: number;
+    hour?: number;
+    minute?: number;
+    timezone: string;
+  }) =>
+    request<{ schedule: Schedule }>("/api/schedules", { method: "POST", body: body(input) }),
+  updateSchedule: (id: string, input: { enabled?: boolean }) =>
+    request<{ schedule: Schedule }>(`/api/schedules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: body(input),
+    }),
+  deleteSchedule: (id: string) =>
+    request<{ ok: true }>(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runSchedule: (id: string) =>
+    request<{ task: Task }>(`/api/schedules/${encodeURIComponent(id)}/run`, { method: "POST" }),
+  notifications: () =>
+    request<{ notifications: AppNotification[]; unread: number }>("/api/notifications"),
+  readNotification: (id: string) =>
+    request<{ notification: AppNotification }>(`/api/notifications/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+    }),
+  readAllNotifications: () =>
+    request<{ updated: number }>("/api/notifications/read-all", { method: "POST" }),
+
   connectors: () => request<ConnectorState>("/api/connectors"),
   authorizeGoogle: () => request<{ url: string }>("/api/connectors/google/authorize"),
   verifyGoogle: () =>
@@ -385,6 +481,7 @@ export interface StreamHandlers {
     summary: string;
     expiresAt: string | null;
     deviceName: string | null;
+    plan?: string[] | null;
   }) => void;
   onDone: () => void;
   onError: (message: string) => void;
@@ -452,6 +549,7 @@ export async function streamMessage(
             summary: string;
             expiresAt: string | null;
             deviceName: string | null;
+            plan?: string[] | null;
           },
         );
       } catch {

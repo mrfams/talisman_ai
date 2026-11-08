@@ -9,6 +9,7 @@ import {
   createApproval,
   createArtifact,
   createMemory,
+  createNotification,
   createStep,
   getArtifact,
   getTask,
@@ -404,6 +405,14 @@ export class TaskEngine {
         kind: "done",
         title: "Task completed",
       });
+      await createNotification(conn, {
+        orgId: task.orgId,
+        userId: task.userId,
+        kind: "task.succeeded",
+        title: "Run finished",
+        body: task.title,
+        data: { taskId: task.id },
+      });
     });
   }
 
@@ -443,6 +452,14 @@ export class TaskEngine {
           kind: "error",
           title: "Task failed",
           detail: message,
+        });
+        await createNotification(conn, {
+          orgId: task.orgId,
+          userId: task.userId,
+          kind: "task.failed",
+          title: "Run failed",
+          body: `${task.title} — ${message}`,
+          data: { taskId: task.id },
         });
       }
     });
@@ -543,6 +560,14 @@ export class TaskEngine {
             title: "Approval required",
             detail: input.summary.slice(0, 500),
             data: { approvalId: approval.id, kind: input.kind },
+          });
+          await createNotification(conn, {
+            orgId: task.orgId,
+            userId: task.userId,
+            kind: "approval.pending",
+            title: "Approval needed",
+            body: input.summary.slice(0, 500),
+            data: { taskId: task.id, approvalId: approval.id },
           });
           return "pending" as const;
         });

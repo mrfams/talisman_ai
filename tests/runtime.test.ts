@@ -6,12 +6,16 @@ import { ArtifactStore } from "../src/workspace/workspace.js";
 import { ModelRouter } from "../src/intelligence/router.js";
 import { MockProvider } from "../src/intelligence/providers/mock.js";
 import {
+  createSchedule,
   decideApproval,
+  getSchedule,
   getTask,
   listApprovals,
+  listNotifications,
   listSteps,
   updateTask,
 } from "../src/db/repos.js";
+import { nextRunAt, runDueSchedules } from "../src/runtime/schedules.js";
 
 async function build(handlers: Record<string, StepHandler>) {
   const database = await makeDatabase();
@@ -81,6 +85,11 @@ test("a task that needs approval waits, then resumes and succeeds", async () => 
     assert.equal(state.task?.progress, 100);
     assert.equal(state.steps[0]!.status, "succeeded");
     assert.deepEqual(state.steps[0]!.output, { published: true });
+    const notifications = await database.withTenant(user.user.orgId, user.user.id, (conn) =>
+      listNotifications(conn, user.user.orgId, user.user.id),
+    );
+    assert.ok(notifications.some((item) => item.kind === "approval.pending"));
+    assert.ok(notifications.some((item) => item.kind === "task.succeeded"));
   } finally {
     await database.close();
   }
@@ -193,6 +202,50 @@ test("a step failure retries until attempts are exhausted, then fails", async ()
   } finally {
     await database.close();
   }
+});
+
+test("a due schedule creates one ordinary task and advances its next run", async () => {
+  const database = await makeDatabase();
+  const { user } = await makeUser(database);
+  try {
+    const schedule = await database.withTenant(user.orgId, user.id, (conn) =>
+      createSchedule(conn, {
+        id: "schedule-test-1",
+        orgId: user.orgId,
+        userId: user.id,
+        title: "Hourly check",
+        goal: "Check the status page and report anything new.",
+        kind: "interval",
+        intervalMinutes: 60,
+        timezone: "UTC",
+        nextRunAt: new Date(Date.now() - 1000),
+      }),
+    );
+    const dispatched = await runDueSchedules(database);
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0]!.scheduleId, schedule.id);
+
+    const state = await database.withTenant(user.orgId, user.id, async (conn) => ({
+      schedule: await getSchedule(conn, schedule.id, user.orgId, user.id),
+      task: await getTask(conn, dispatched[0]!.taskId),
+    }));
+    assert.equal(state.task?.status, "queued");
+    assert.equal(state.schedule?.lastTaskId, state.task?.id);
+    assert.ok(new Date(state.schedule!.nextRunAt).getTime() > Date.now());
+
+    const repeated = await runDueSchedules(database);
+    assert.equal(repeated.length, 0, "a dispatched schedule must not fire twice");
+  } finally {
+    await database.close();
+  }
+});
+
+test("daily schedules keep their wall-clock time in the chosen zone", () => {
+  const next = nextRunAt(
+    { kind: "daily", intervalMinutes: null, hour: 9, minute: 30, timezone: "Europe/London" },
+    new Date("2026-11-08T10:00:00.000Z"),
+  );
+  assert.equal(next.toISOString(), "2026-11-09T09:30:00.000Z");
 });
 
 test("a failure below max attempts is requeued with a backoff", async () => {

@@ -4,6 +4,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { z, ZodError } from "zod";
 import type { Config } from "../core/config.js";
 import { errors, TalismanError } from "../core/errors.js";
+import { newId } from "../core/ids.js";
 import { log } from "../core/log.js";
 import type { Database, Conn } from "../db/database.js";
 import {
@@ -11,12 +12,16 @@ import {
   appendEvent,
   createConversation,
   createMemory,
+  createSchedule,
   createTask,
   decideApproval,
   deleteMemory,
+  deleteSchedule,
   getApproval,
   getArtifact,
   getConversation,
+  getProfile,
+  getSchedule,
   getTask,
   listApprovals,
   listApprovalsForUser,
@@ -28,11 +33,18 @@ import {
   listMemories,
   listMembers,
   listMessages,
+  listNotifications,
   listOrgIds,
+  listSchedules,
   listSteps,
   listTasks,
+  markAllNotificationsRead,
+  markNotificationRead,
   recordAudit,
+  unreadNotificationCount,
+  updateSchedule,
   updateTask,
+  upsertProfile,
 } from "../db/repos.js";
 import { planGoal } from "../runtime/planner.js";
 import { isTerminal, type SessionInfo, type Task } from "../core/types.js";
@@ -62,7 +74,14 @@ import {
 import type { ModelRouter } from "../intelligence/router.js";
 import { Agent, type AgentTool } from "../intelligence/agent.js";
 import type { ChatMessage } from "../intelligence/types.js";
-import { buildContext, selectMemories } from "../intelligence/context.js";
+import { buildContext } from "../intelligence/context.js";
+import {
+  backfillMemoryEmbeddings,
+  createEmbedder,
+  selectMemoriesSemantic,
+  type Embedder,
+} from "../intelligence/embedding.js";
+import { nextRunAt, runDueSchedules, validTimezone } from "../runtime/schedules.js";
 
 export interface AppDeps {
   config: Config;
@@ -79,6 +98,8 @@ export interface AppDeps {
   google?: GoogleCalendar;
   /** Injectable for tests; otherwise built from config. */
   browserFactory?: () => BrowserDriver | null;
+  /** Injectable for tests; otherwise built from GEMINI_API_KEY. */
+  embedder?: Embedder | null;
 }
 
 type Env = { Variables: { session: SessionInfo; token: string } };
@@ -117,6 +138,53 @@ function compactTaskResult(result: unknown): unknown {
 }
 
 const decisionBody = z.object({ decision: z.enum(["approved", "denied"]) });
+
+const scheduleTiming = {
+  kind: z.enum(["interval", "daily"]).default("interval"),
+  intervalMinutes: z.number().int().min(5).max(10_080).optional(),
+  hour: z.number().int().min(0).max(23).optional(),
+  minute: z.number().int().min(0).max(59).optional(),
+  timezone: z.string().trim().min(1).max(80).default("UTC"),
+};
+
+const scheduleBody = z
+  .object({
+    title: z.string().trim().min(1).max(200),
+    goal: z.string().trim().min(3).max(20_000),
+    ...scheduleTiming,
+    enabled: z.boolean().default(true),
+  })
+  .refine(
+    (value) => value.kind !== "interval" || (value.intervalMinutes ?? 0) >= 5,
+    { message: "intervalMinutes is required for an interval schedule", path: ["intervalMinutes"] },
+  )
+  .refine((value) => value.kind !== "daily" || value.hour !== undefined, {
+    message: "hour is required for a daily schedule",
+    path: ["hour"],
+  });
+
+const schedulePatch = z.object({
+  title: z.string().trim().min(1).max(200).optional(),
+  goal: z.string().trim().min(3).max(20_000).optional(),
+  kind: z.enum(["interval", "daily"]).optional(),
+  intervalMinutes: z.number().int().min(5).max(10_080).nullable().optional(),
+  hour: z.number().int().min(0).max(23).nullable().optional(),
+  minute: z.number().int().min(0).max(59).nullable().optional(),
+  timezone: z.string().trim().min(1).max(80).optional(),
+  enabled: z.boolean().optional(),
+});
+
+const profileBody = z.object({
+  displayName: z.string().trim().max(120).nullable().optional(),
+  timezone: z.string().trim().min(1).max(80).optional(),
+  locale: z.string().trim().min(1).max(20).optional(),
+  preferences: z.record(z.string(), z.unknown()).optional(),
+});
+
+function publicMemory(memory: Awaited<ReturnType<typeof listMemories>>[number]): Record<string, unknown> {
+  const { embedding: _embedding, ...rest } = memory;
+  return rest;
+}
 
 function requireUser(c: AppContext): SessionInfo {
   return c.get("session");
@@ -181,6 +249,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   const phone = createPhone(deps.config);
   const phoneService = new PhoneService(deps.database, deps.config.publicUrl);
   const browserFactory = deps.browserFactory ?? (() => createBrowser(deps.config));
+  const embedder = deps.embedder === undefined ? createEmbedder(deps.config) : deps.embedder;
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
@@ -760,8 +829,37 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const history = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       listMessages(conn, id, 40),
     );
-    const memories = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+    let memories = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       listMemories(conn, user.orgId, user.id, 100),
+    );
+    const profile = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      getProfile(conn, user.orgId, user.id),
+    );
+    let queryEmbedding: number[] | null = null;
+    if (embedder) {
+      // Do one query embedding and a bounded backfill in parallel. The chat must
+      // not wait on the provider once per unindexed memory.
+      const [, vector] = await Promise.all([
+        backfillMemoryEmbeddings({
+          database: deps.database,
+          embedder,
+          orgId: user.orgId,
+          userId: user.id,
+          limit: 2,
+        }).catch(() => 0),
+        embedder.embed(body.context ?? body.content).catch(() => null),
+      ]);
+      queryEmbedding = vector;
+      if (vector) {
+        memories = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+          listMemories(conn, user.orgId, user.id, 100),
+        );
+      }
+    }
+    const relevantMemories = selectMemoriesSemantic(
+      memories,
+      body.context ?? body.content,
+      queryEmbedding,
     );
     const chatHistory: ChatMessage[] = history.map((message) => {
       const content = message.content as { text?: string } | null;
@@ -774,6 +872,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
       .activeDevice(user.orgId, user.id)
       .catch(() => null);
     const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
+    const profileContext = profile
+      ? `\n\nUser profile: timezone ${profile.timezone}; locale ${profile.locale}; display name ${profile.displayName ?? "unknown"}. Preferences: ${JSON.stringify(profile.preferences)}. Use the timezone when interpreting times and schedules.`
+      : "";
     const phoneContext = companionDevice
       ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly: call phone_look first, then phone_tap_text, phone_type, phone_scroll, phone_back, phone_open_app, or phone_home. Do not use create_task for phone control. Those action tools only create an approval card; no action runs until the user presses Allow once. Work through the task step by step: after each approved action the client continues automatically, so read the screen again and take the next step. For a call, open the relevant app, search for the contact, open the conversation, then tap the call control. Never repeat an action that already succeeded. Never say a phone action succeeded until a tool returns an executed result.`
       : "";
@@ -782,8 +883,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
         ? `\n\nInternal continuation after a phone approval (not a new user request): ${body.context}\nContinue the original request from the current phone screen. Do not repeat an action that already succeeded. If the requested result is complete, say so plainly.`
         : "";
     const messages = buildContext({
-      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look something up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive.${phoneContext}${continuation}`,
-      memories: selectMemories(memories, body.context ?? body.content),
+      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look things up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive. When a phone path is already known, put up to six taps into phone_plan so the owner approves the whole plan once; use wait_for text so a changed screen stops the flow.${profileContext}${phoneContext}${continuation}`,
+      memories: relevantMemories,
       history: chatHistory,
       budgetTokens: 24_000,
     });
@@ -868,6 +969,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
         execute: async (args) => {
           const content = String(args.content ?? "").slice(0, 4000);
           if (!content) return { error: "content is required" };
+          const embedding = embedder ? await embedder.embed(content).catch(() => null) : null;
           const memory = await deps.database.withTenant(user.orgId, user.id, (conn) =>
             createMemory(conn, {
               orgId: user.orgId,
@@ -875,6 +977,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
               kind: String(args.kind ?? "fact"),
               content,
               source: "chat",
+              embedding,
+              embeddingModel: embedding && embedder ? embedder.model : null,
             }),
           );
           return { memoryId: memory.id };
@@ -931,6 +1035,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
                     approval_id?: string;
                     summary?: string;
                     expires_at?: string;
+                    plan?: unknown;
                     taskId?: string;
                     progress?: number;
                   }
@@ -946,6 +1051,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
                     summary: result.summary ?? "Phone action",
                     expiresAt: result.expires_at ?? null,
                     deviceName: companionDevice?.name ?? null,
+                    plan: Array.isArray(result.plan) ? result.plan : null,
                   }),
                 });
               }
@@ -1222,6 +1328,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!deps.engine) throw errors.unavailable("This deployment has no executor");
     const startedAt = Date.now();
     const budget = deps.config.maxRunMs;
+    const scheduled = await runDueSchedules(deps.database).catch((error) => {
+      log.warn("scheduled dispatch failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    });
     const results: Array<{ taskId: string; outcome: string }> = [];
     const orgIds = await listOrgIds(deps.database.driver);
     for (const orgId of orgIds) {
@@ -1237,6 +1349,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.json({
       ok: true,
       ran: results.length,
+      scheduled: scheduled.length,
+      scheduledTasks: scheduled,
       results,
       durationMs: Date.now() - startedAt,
     });
@@ -1325,6 +1439,217 @@ export function createApp(deps: AppDeps): Hono<Env> {
     });
   });
 
+  /* ------------------------------------------------------------ schedules */
+
+  app.get("/api/schedules", async (c) => {
+    const { user } = requireUser(c);
+    const schedules = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      listSchedules(conn, user.orgId, user.id),
+    );
+    return c.json({ schedules });
+  });
+
+  app.post("/api/schedules", async (c) => {
+    const body = scheduleBody.parse(await c.req.json());
+    const { user } = requireUser(c);
+    if (!validTimezone(body.timezone)) throw errors.invalid("That timezone is not recognised");
+    const next = nextRunAt(
+      {
+        ...body,
+        intervalMinutes: body.intervalMinutes ?? null,
+        hour: body.hour ?? null,
+        minute: body.minute ?? 0,
+      },
+      new Date(),
+    );
+    const schedule = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      createSchedule(conn, {
+        id: newId(),
+        orgId: user.orgId,
+        userId: user.id,
+        title: body.title,
+        goal: body.goal,
+        kind: body.kind,
+        intervalMinutes: body.intervalMinutes ?? null,
+        hour: body.hour ?? null,
+        minute: body.minute ?? 0,
+        timezone: body.timezone,
+        enabled: body.enabled,
+        nextRunAt: next,
+      }),
+    );
+    await audit(deps, requireUser(c), "schedule.created", "schedule", schedule.id, {
+      kind: schedule.kind,
+    });
+    return c.json({ schedule }, 201);
+  });
+
+  app.patch("/api/schedules/:id", async (c) => {
+    const body = schedulePatch.parse(await c.req.json());
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const updated = await deps.database.withTenant(user.orgId, user.id, async (conn) => {
+      const existing = await getSchedule(conn, id, user.orgId, user.id);
+      if (!existing) return null;
+      const merged = {
+        kind: body.kind ?? existing.kind,
+        intervalMinutes:
+          body.intervalMinutes === null
+            ? null
+            : body.intervalMinutes ?? existing.intervalMinutes,
+        hour: body.hour === null ? null : body.hour ?? existing.hour,
+        minute: body.minute === null ? null : body.minute ?? existing.minute,
+        timezone: body.timezone ?? existing.timezone,
+      };
+      if (!validTimezone(merged.timezone)) throw errors.invalid("That timezone is not recognised");
+      if (merged.kind === "interval" && (merged.intervalMinutes ?? 0) < 5) {
+        throw errors.invalid("An interval schedule needs at least five minutes");
+      }
+      if (merged.kind === "daily" && merged.hour === null) {
+        throw errors.invalid("A daily schedule needs an hour");
+      }
+      const patch: Record<string, unknown> = { ...body };
+      if (body.kind === "interval") {
+        patch.hour = null;
+        patch.minute = null;
+      }
+      if (body.kind === "daily") {
+        patch.intervalMinutes = null;
+      }
+      const timingChanged =
+        body.kind !== undefined ||
+        body.intervalMinutes !== undefined ||
+        body.hour !== undefined ||
+        body.minute !== undefined ||
+        body.timezone !== undefined;
+      if (timingChanged || (body.enabled === true && !existing.enabled)) {
+        patch.nextRunAt = nextRunAt(merged, new Date());
+      }
+      return updateSchedule(conn, id, user.orgId, user.id, patch);
+    });
+    if (!updated) throw errors.notFound("Schedule not found");
+    await audit(deps, requireUser(c), "schedule.updated", "schedule", id);
+    return c.json({ schedule: updated });
+  });
+
+  app.delete("/api/schedules/:id", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const removed = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      deleteSchedule(conn, id, user.orgId, user.id),
+    );
+    if (!removed) throw errors.notFound("Schedule not found");
+    await audit(deps, requireUser(c), "schedule.deleted", "schedule", id);
+    return c.json({ ok: true });
+  });
+
+  app.post("/api/schedules/:id/run", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const created = await deps.database.withTenant(user.orgId, user.id, async (conn) => {
+      const schedule = await getSchedule(conn, id, user.orgId, user.id);
+      if (!schedule) return null;
+      const plan = planGoal(schedule.goal);
+      const task = await createTask(conn, {
+        orgId: user.orgId,
+        userId: user.id,
+        title: schedule.title,
+        goal: schedule.goal,
+        plan,
+      });
+      await appendEvent(conn, {
+        orgId: user.orgId,
+        taskId: task.id,
+        kind: "plan",
+        title: "Scheduled run started",
+        data: { plan, scheduleId: schedule.id },
+      });
+      await updateSchedule(conn, id, user.orgId, user.id, {
+        lastRunAt: new Date(),
+        lastTaskId: task.id,
+      });
+      return task;
+    });
+    if (!created) throw errors.notFound("Schedule not found");
+    let current = created;
+    if (deps.engine) {
+      const claimed = await deps.engine.claimById(user.orgId, user.id, created.id);
+      if (claimed) {
+        await deps.engine
+          .runClaimed(claimed, { budgetMs: Math.min(20_000, deps.config.maxRunMs) })
+          .catch(() => undefined);
+      }
+      current =
+        (await deps.database.withTenant(user.orgId, user.id, (conn) =>
+          getTask(conn, created.id),
+        )) ?? current;
+    }
+    await audit(deps, requireUser(c), "schedule.ran", "schedule", id, { taskId: current.id });
+    return c.json({ task: current }, 201);
+  });
+
+  /* --------------------------------------------------------- notifications */
+
+  app.get("/api/notifications", async (c) => {
+    const { user } = requireUser(c);
+    const limit = Math.min(Number(c.req.query("limit") ?? 40) || 40, 100);
+    const result = await deps.database.withTenant(user.orgId, user.id, async (conn) => ({
+      notifications: await listNotifications(conn, user.orgId, user.id, limit),
+      unread: await unreadNotificationCount(conn, user.orgId, user.id),
+    }));
+    return c.json(result);
+  });
+
+  app.post("/api/notifications/read-all", async (c) => {
+    const { user } = requireUser(c);
+    const updated = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      markAllNotificationsRead(conn, user.orgId, user.id),
+    );
+    return c.json({ updated });
+  });
+
+  app.post("/api/notifications/:id/read", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const notification = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      markNotificationRead(conn, id, user.orgId, user.id),
+    );
+    if (!notification) throw errors.notFound("Notification not found");
+    return c.json({ notification });
+  });
+
+  /* ---------------------------------------------------------------- profile */
+
+  app.get("/api/profile", async (c) => {
+    const { user } = requireUser(c);
+    const profile = await deps.database.withTenant(user.orgId, user.id, (conn) =>
+      getProfile(conn, user.orgId, user.id),
+    );
+    return c.json({ profile, user: { name: user.name, email: user.email } });
+  });
+
+  app.patch("/api/profile", async (c) => {
+    const body = profileBody.parse(await c.req.json());
+    const { user } = requireUser(c);
+    if (body.timezone && !validTimezone(body.timezone)) {
+      throw errors.invalid("That timezone is not recognised");
+    }
+    const profile = await deps.database.withTenant(user.orgId, user.id, async (conn) => {
+      const existing = await getProfile(conn, user.orgId, user.id);
+      return upsertProfile(conn, {
+        orgId: user.orgId,
+        userId: user.id,
+        displayName:
+          body.displayName === undefined ? existing?.displayName ?? user.name : body.displayName,
+        timezone: body.timezone ?? existing?.timezone ?? "UTC",
+        locale: body.locale ?? existing?.locale ?? "en",
+        preferences: body.preferences ?? existing?.preferences ?? {},
+      });
+    });
+    await audit(deps, requireUser(c), "profile.updated", "profile", user.id);
+    return c.json({ profile });
+  });
+
   /* ------------------------------------------------------------ memories */
 
   app.get("/api/memories", async (c) => {
@@ -1332,7 +1657,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const memories = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       listMemories(conn, user.orgId, user.id),
     );
-    return c.json({ memories });
+    return c.json({ memories: memories.map(publicMemory) });
   });
 
   app.post("/api/memories", async (c) => {
@@ -1340,6 +1665,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       .object({ content: z.string().min(1).max(4000), kind: z.string().max(40).default("fact") })
       .parse(await c.req.json());
     const { user } = requireUser(c);
+    const embedding = embedder ? await embedder.embed(body.content).catch(() => null) : null;
     const memory = await deps.database.withTenant(user.orgId, user.id, (conn) =>
       createMemory(conn, {
         orgId: user.orgId,
@@ -1347,9 +1673,24 @@ export function createApp(deps: AppDeps): Hono<Env> {
         kind: body.kind,
         content: body.content,
         source: "user",
+        embedding,
+        embeddingModel: embedding && embedder ? embedder.model : null,
       }),
     );
-    return c.json({ memory }, 201);
+    return c.json({ memory: publicMemory(memory) }, 201);
+  });
+
+  app.post("/api/memories/embed", async (c) => {
+    const { user } = requireUser(c);
+    if (!embedder) throw errors.unavailable("Semantic memory needs GEMINI_API_KEY");
+    const updated = await backfillMemoryEmbeddings({
+      database: deps.database,
+      embedder,
+      orgId: user.orgId,
+      userId: user.id,
+      limit: 50,
+    });
+    return c.json({ updated, model: embedder.model });
   });
 
   app.delete("/api/memories/:id", async (c) => {

@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   ArrowDown,
   ArrowUp,
   ArrowUpRight,
+  Bell,
+  CalendarClock,
+  CheckCheck,
   Home,
   ListChecks,
   LogOut,
@@ -21,7 +25,8 @@ import {
   Users,
 } from "lucide-react";
 import { useMe, useSignOut, useTasks, errorMessage } from "../lib/queries";
-import { IconButton, timeAgo } from "../ui";
+import { api, type AppNotification } from "../lib/api";
+import { IconButton, Skeleton, timeAgo } from "../ui";
 import { BrandMark } from "../BrandMark";
 import type { Task } from "../lib/api";
 
@@ -33,6 +38,7 @@ const NAV_GROUPS = [
       { to: "/chat", label: "Chat", icon: MessageSquare },
       { to: "/tasks", label: "Runs", icon: ListChecks },
       { to: "/approvals", label: "Approvals", icon: ShieldCheck },
+      { to: "/schedules", label: "Schedules", icon: CalendarClock },
     ],
   },
   {
@@ -59,6 +65,8 @@ const MOBILE = [
   { to: "/", label: "Today", icon: Home, end: true },
   { to: "/chat", label: "Chat", icon: MessageSquare },
   { to: "/tasks", label: "Runs", icon: ListChecks },
+  { to: "/approvals", label: "Approvals", icon: ShieldCheck },
+  { to: "/schedules", label: "Schedules", icon: CalendarClock },
   { to: "/connectors", label: "Apps", icon: Plug },
   { to: "/settings", label: "You", icon: Settings },
 ];
@@ -68,6 +76,7 @@ const TITLES: Record<string, string> = {
   "/chat": "Chat",
   "/tasks": "Runs",
   "/approvals": "Approvals",
+  "/schedules": "Schedules",
   "/artifacts": "Artifacts",
   "/connectors": "Connectors",
   "/devices": "Devices",
@@ -224,6 +233,7 @@ export function AppShell() {
           >
             {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
           </IconButton>
+          <NotificationBell />
           <IconButton label="New chat" onClick={() => navigate("/chat")}>
             <MessageSquare size={15} />
           </IconButton>
@@ -248,6 +258,99 @@ export function AppShell() {
           onTheme={toggle}
           onSignOut={() => signOut.mutate()}
         />
+      ) : null}
+    </div>
+  );
+}
+
+function NotificationBell() {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement | null>(null);
+  const query = useQuery({
+    queryKey: ["notifications"],
+    queryFn: api.notifications,
+    refetchInterval: 20_000,
+  });
+  const readAll = useMutation({
+    mutationFn: api.readAllNotifications,
+    onSuccess: async () => client.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+  const readOne = useMutation({
+    mutationFn: api.readNotification,
+    onSuccess: async () => client.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (wrap.current && !wrap.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const items = query.data?.notifications ?? [];
+  const unread = query.data?.unread ?? 0;
+
+  function openItem(item: AppNotification) {
+    if (!item.readAt) readOne.mutate(item.id);
+    setOpen(false);
+    if (item.data?.taskId) navigate(`/tasks/${item.data.taskId}`);
+    else if (item.kind === "approval.pending") navigate("/approvals");
+  }
+
+  return (
+    <div className="notif-wrap" ref={wrap}>
+      <IconButton label="Notifications" onClick={() => setOpen((value) => !value)}>
+        <Bell size={15} />
+        {unread > 0 ? <span className="notif-dot" aria-label={`${unread} unread`} /> : null}
+      </IconButton>
+      {open ? (
+        <div className="notif-pop" role="dialog" aria-label="Notifications">
+          <div className="notif-head">
+            <span className="small" style={{ fontWeight: 600 }}>
+              Notifications
+            </span>
+            <button
+              className="icon-btn"
+              style={{ width: 24, height: 24 }}
+              aria-label="Mark all read"
+              title="Mark all read"
+              disabled={unread === 0 || readAll.isPending}
+              onClick={() => readAll.mutate()}
+            >
+              <CheckCheck size={13} />
+            </button>
+          </div>
+          {query.isLoading ? (
+            <div className="stack" style={{ padding: 12 }}>
+              <Skeleton h={12} />
+              <Skeleton h={12} w="75%" />
+            </div>
+          ) : items.length === 0 ? (
+            <p className="tiny muted" style={{ padding: "18px 12px", lineHeight: 1.55 }}>
+              No notifications yet. Finished runs, failures and approvals show up here.
+            </p>
+          ) : (
+            <div className="notif-list">
+              {items.map((item) => (
+                <button
+                  key={item.id}
+                  className="notif-item"
+                  data-unread={item.readAt ? undefined : "true"}
+                  onClick={() => openItem(item)}
+                >
+                  <span className="notif-kind">{item.kind.replace(/_/g, " ")}</span>
+                  <span className="notif-title">{item.title}</span>
+                  {item.body ? <span className="notif-body">{item.body}</span> : null}
+                  <span className="notif-time">{timeAgo(item.createdAt)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       ) : null}
     </div>
   );

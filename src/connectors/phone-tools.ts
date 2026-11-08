@@ -10,6 +10,8 @@ export interface PhoneApprovalRequestResult {
   approvalId: string;
   summary: string;
   expiresAt: string;
+  /** Human-readable preview of a multi-step plan. */
+  plan?: string[];
 }
 
 type Ask = (input: PhoneApprovalRequest) => Promise<PhoneApprovalRequestResult>;
@@ -45,6 +47,7 @@ export function phoneTools({
       approval_id: requested.approvalId,
       summary: requested.summary,
       expires_at: requested.expiresAt,
+      plan: requested.plan ?? null,
       message:
         "No action has run yet. The user must approve the card on screen; do not claim it happened.",
     };
@@ -200,6 +203,122 @@ export function phoneTools({
         parameters: { type: "object", properties: {}, additionalProperties: false },
       },
       execute: async () => approval("act", { action: "global", name: "home" }),
+    },
+    {
+      definition: {
+        name: "phone_plan",
+        description:
+          "Run a short sequence of taps on the phone under one approval. Call phone_look first. Each step can wait for visible text before tapping; if that text never appears, the flow stops instead of tapping blind. Use this for a known path such as opening a conversation and pressing a control. The user approves the whole exact plan once.",
+        parameters: {
+          type: "object",
+          properties: {
+            steps: {
+              type: "array",
+              minItems: 1,
+              maxItems: 6,
+              items: {
+                type: "object",
+                properties: {
+                  wait_for: {
+                    type: "object",
+                    properties: {
+                      text: { type: "string", description: "Visible text to wait for" },
+                      timeout_ms: { type: "number", description: "Up to 15000; defaults to 8000" },
+                    },
+                    required: ["text"],
+                  },
+                  then: {
+                    type: "object",
+                    description:
+                      "The action to run after the wait: tap_text, tap, global back/home, or none.",
+                    properties: {
+                      action: { type: "string", enum: ["tap_text", "tap", "global", "none"] },
+                      text: { type: "string" },
+                      x: { type: "number" },
+                      y: { type: "number" },
+                      name: { type: "string", enum: ["back", "home"] },
+                    },
+                    required: ["action"],
+                  },
+                  optional: { type: "boolean" },
+                },
+                required: ["then"],
+              },
+            },
+          },
+          required: ["steps"],
+        },
+      },
+      execute: async (args) => {
+        const raw = Array.isArray(args.steps) ? args.steps : [];
+        if (raw.length === 0) return { error: "steps is required" };
+        if (raw.length > 6) return { error: "A phone plan can have at most 6 steps" };
+        const steps: Array<Record<string, unknown>> = [];
+        const preview: string[] = [];
+        for (const entry of raw.slice(0, 6)) {
+          if (!entry || typeof entry !== "object") return { error: "Each step must be an object" };
+          const step = entry as Record<string, unknown>;
+          const then = step.then;
+          if (!then || typeof then !== "object") return { error: "Each step needs a then action" };
+          const action = String((then as Record<string, unknown>).action ?? "");
+          const source = then as Record<string, unknown>;
+          const wait =
+            step.wait_for && typeof step.wait_for === "object"
+              ? (step.wait_for as Record<string, unknown>)
+              : null;
+          const normalizedWait = wait
+            ? {
+                text: String(wait.text ?? "").trim().slice(0, 120),
+                timeout_ms: Math.min(15_000, Math.max(1_000, Number(wait.timeout_ms ?? 8_000))),
+              }
+            : null;
+          if (normalizedWait && !normalizedWait.text) return { error: "wait_for.text is required" };
+          if (!normalizedWait && action !== "none") {
+            return {
+              error:
+                "Every plan step needs wait_for text so a changed screen stops the flow instead of tapping blind",
+            };
+          }
+
+          let normalizedThen: Record<string, unknown>;
+          if (action === "tap_text") {
+            const text = String(source.text ?? "").trim().slice(0, 120);
+            if (!text) return { error: "tap_text needs text" };
+            normalizedThen = { action, text };
+          } else if (action === "tap") {
+            const x = Number(source.x);
+            const y = Number(source.y);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return { error: "tap needs x and y" };
+            normalizedThen = { action, x: Math.round(x), y: Math.round(y) };
+          } else if (action === "global") {
+            const name = String(source.name ?? "").toLowerCase();
+            if (name !== "back" && name !== "home") return { error: "global must be back or home" };
+            normalizedThen = { action, name };
+          } else if (action === "none") {
+            normalizedThen = { action };
+          } else {
+            return { error: `Unsupported plan action: ${action || "missing"}` };
+          }
+
+          const normalized: Record<string, unknown> = { then: normalizedThen };
+          if (normalizedWait) normalized.wait_for = normalizedWait;
+          if (step.optional === true) normalized.optional = true;
+          steps.push(normalized);
+          preview.push(
+            `${normalizedWait ? `wait for “${normalizedWait.text}” then ` : ""}${
+              action === "tap_text"
+                ? `tap “${String(normalizedThen.text)}”`
+                : action === "tap"
+                  ? `tap (${String(normalizedThen.x)}, ${String(normalizedThen.y)})`
+                  : action === "global"
+                    ? `press ${String(normalizedThen.name)}`
+                    : "continue"
+            }`,
+          );
+        }
+        const result = await approval("flow", { steps });
+        return { ...result, plan: preview };
+      },
     },
   ];
 }

@@ -13,6 +13,7 @@ import { Activity } from "./pages/Activity";
 import { Team } from "./pages/Team";
 import { Devices } from "./pages/Devices";
 import { Settings } from "./pages/Settings";
+import { Schedules } from "./pages/Schedules";
 import { NotFound } from "./pages/NotFound";
 
 function RequireAuth() {
@@ -44,6 +45,7 @@ export function App() {
           <Route path="tasks/:id" element={<TaskDetail />} />
           <Route path="artifacts" element={<Artifacts />} />
           <Route path="approvals" element={<Approvals />} />
+          <Route path="schedules" element={<Schedules />} />
           <Route path="activity" element={<Activity />} />
           <Route path="team" element={<Team />} />
           <Route path="connectors" element={<Connectors />} />

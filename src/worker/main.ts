@@ -9,6 +9,7 @@ import { ArtifactStore } from "../workspace/workspace.js";
 import { PlaywrightBrowser } from "../browser/playwright.js";
 import { createBrowser } from "../browser/factory.js";
 import { loadLocalEnv } from "../core/env.js";
+import { runDueSchedules } from "../runtime/schedules.js";
 
 loadLocalEnv();
 const config = loadConfig();
@@ -27,8 +28,16 @@ const engine = new TaskEngine({
 
 let running = true;
 let active = 0;
+let lastScheduleCheck = 0;
 
 async function tick(): Promise<void> {
+  if (Date.now() - lastScheduleCheck >= 15_000) {
+    lastScheduleCheck = Date.now();
+    const dispatched = await runDueSchedules(database);
+    if (dispatched.length > 0) {
+      log.info("scheduled runs queued", { count: dispatched.length });
+    }
+  }
   const orgIds = await listOrgIds(database.driver);
   for (const orgId of orgIds) {
     while (running && active < config.workerConcurrency) {

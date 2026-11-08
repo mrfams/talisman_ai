@@ -185,6 +185,32 @@ test("phone tools ask for approval before they touch the phone", async () => {
     "a tap must not reach the phone before approval",
   );
 
+  const plan = byName.get("phone_plan")!;
+  const planned = (await plan.execute(
+    {
+      steps: [
+        { wait_for: { text: "Send" }, then: { action: "tap_text", text: "Send" } },
+      ],
+    },
+    { signal: new AbortController().signal, callId: "call-plan" },
+  )) as { status: string; plan: string[] };
+  assert.equal(planned.status, "approval_required");
+  assert.deepEqual(requested[1], {
+    op: "flow",
+    args: {
+      steps: [
+        { wait_for: { text: "Send", timeout_ms: 8_000 }, then: { action: "tap_text", text: "Send" } },
+      ],
+    },
+  });
+  assert.match(planned.plan[0] ?? "", /tap “Send”/);
+
+  const unguarded = (await plan.execute(
+    { steps: [{ then: { action: "global", name: "back" } }] },
+    { signal: new AbortController().signal, callId: "call-plan-2" },
+  )) as { error?: string };
+  assert.match(unguarded.error ?? "", /wait_for/);
+
   const look = byName.get("phone_look")!;
   const screen = (await look.execute(
     {},
