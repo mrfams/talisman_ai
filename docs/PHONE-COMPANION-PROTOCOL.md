@@ -2,9 +2,10 @@
 
 **Status:** the backend queue, pairing, frame storage, legacy transport adapter, and the Android
 companion source are implemented. A debug APK builds successfully in GitHub Actions (run
-`42419256753`, release `companion-5-1`) and the published asset was downloaded and hash-checked. It
-has **not** been installed or exercised on a real phone yet. Do not describe live pairing or
-AccessibilityService execution as verified until that test has happened.
+`42419256753`, release `companion-5-1`) and the published asset was downloaded and hash-checked.
+The APK is installed on the owner's Android phone, and pairing, heartbeat, and device telemetry are
+working. AccessibilityService action execution through the approval card has **not** yet been
+verified on the physical phone; do not describe that as verified until it has.
 
 The phone is the host. Talisman is a mailbox and planner; it never opens an inbound port on the
 phone. The companion polls outbound, claims one command, executes it, and posts one result.
@@ -31,8 +32,8 @@ Tables are defined in `src/db/schema.sql`:
 - `phone_pairing_codes` and `phone_devices` are deliberately **outside RLS**: token lookup happens
   before a tenant transaction exists. Every query against them filters `org_id`/`user_id`
   explicitly.
-- `phone_commands` and `phone_frames` carry `org_id` and `user_id` and are protected by the same
-  forced RLS policy as every other tenant table.
+- `phone_commands`, `phone_approvals`, and `phone_frames` carry `org_id` and `user_id` and are
+  protected by the same forced RLS policy as every other tenant table.
 
 There is no PIN, password, pattern, or lock-credential storage anywhere in the companion.
 
@@ -204,9 +205,13 @@ All browser routes use the normal Talisman session.
 | `GET /api/devices/:id/diagnostics` | device, diagnostics, capabilities, settings |
 | `GET /api/devices/:id/frame` | latest JPEG or 404 |
 | `POST /api/devices/:id/op` | **read-only** manual ops: `observe`, `apps`, `status` |
+| `POST /api/devices/:id/actions` | request a one-shot approval for `act`/`flow`; queues only after a human decision |
+| `GET /api/phone/approvals` | list pending one-shot phone approvals |
+| `POST /api/phone/approvals/:id/decision` | approve or refuse exactly one pending action |
 
 `POST /api/devices/:id/op` exists for diagnosis. It rejects every mutating op with `403`: actions
-must travel through a run with an approval, not through a second console path.
+must travel through a one-shot approval, not through a second console path. The Devices page and
+chat both use `POST /api/devices/:id/actions`; the panel is not an unaudited bypass.
 
 The legacy `POST /api/devices/op` route remains for the cloud/bridge `PhoneTransport`; it is not
 used by the companion.
@@ -331,22 +336,21 @@ The Android companion enforces, before executing an op:
 - loopback-only local bridge at `127.0.0.1:7333`, guarded by an encrypted local token; the bridge is
   not exposed on the LAN and its notification no longer prints the token or URL.
 
-The engine marks `phone_tap_text`, `phone_type`, and `phone_open_app` as `requiresApproval`.
-`Agent` default-denies a tool marked `requiresApproval` when no approval callback is supplied.
-`Agent` currently does not pass an approval id to the tool, and `CompanionPhone` enqueues actions
-without an `approval_id`. The Android verifier refuses `act` and `flow` unless **both** `approval_id` and
-`args_hash` are present, then checks that the arguments hash to the approved
-value. Read-only ops do not require an approval. Therefore:
+Phone actions are approval-bound end to end:
 
-- read-only observation is usable now;
-- phone actions are intentionally denied by the default-deny engine path;
-- **approval-id binding and the chat approval flow are the next required step** before any action
-  is described as production-ready. Until then, do not add an `approve` callback that executes a
-  phone action without also threading the approval id and checking the approved row/hash on the
-  server.
+- `phone_tap_text`, `phone_type`, `phone_open_app`, and `phone_home` in chat do not execute. They
+  create a durable `phone_approvals` row containing the exact `act`/`flow` args and their hash.
+- The Devices page's Phone actions panel uses the same request endpoint. **Allow once** queues one
+  command; **Refuse** queues nothing.
+- Approval rows are one-shot, expiring, tenant-scoped, and RLS-protected. Only the owning user can
+  decide them.
+- When approved, the server queues the command with `approval_id` and `args_hash`. The Android
+  verifier refuses `act` and `flow` unless **both** are present and the args still hash to the
+  approved value. Missing or mismatched values return `approval_required` or `approval_mismatch`.
+- Read-only `observe`, `apps`, and `status` remain unapproved, but they cannot mutate the phone.
 
-The server-side `approval_id` column, `args_hash`, and Android `CanonicalJson` verifier already
-exist for that wiring.
+The approval card shows a short summary. The binding is the argument hash checked on the phone, so
+changing the arguments after approval is rejected.
 
 ---
 
@@ -362,13 +366,16 @@ The companion sends `X-Talisman-App` and `X-Talisman-Protocol` on its JSON reque
 changes are additive; breaking changes should use a new path and keep the previous version for one
 release.
 
-Verified on 7 November 2026:
+Verified on 8 November 2026:
 
 - server `tsc --noEmit`: pass;
 - app `tsc -p app/tsconfig.json --noEmit`: pass;
-- `tests/phone-queue.test.ts`: 4/4 pass — single-use/tenant-scoped pairing and hashed tokens,
-  atomic claim/idempotent result/tenant-scoped frames, pause/rotate/revoke, and expired-command plus
-  canonical-hash checks;
+- `tests/phone-queue.test.ts`: 5/5 pass — single-use/tenant-scoped pairing and hashed tokens,
+  atomic claim/idempotent result/tenant-scoped frames, pause/rotate/revoke, expired-command plus
+  canonical-hash checks, and request → approve → claim with `approval_id`/`args_hash`, cross-tenant
+  refusal, and deny-never-queues;
+- `tests/phone.test.ts`: 4/4 pass — connector transports and phone tools create approval requests
+  instead of sending taps directly;
 - GitHub Actions `Android companion APK` run `42419256753`: success; the APK is 4,462,075 bytes
   with SHA-256 `95aa03f89254b77e1861beb7e40609dcafd342c4260ec5e9ba0e7f68a45fa382`, and the downloaded
   release asset matches that digest;
@@ -377,6 +384,6 @@ Verified on 7 November 2026:
 
 Not verified:
 
-- a real phone pairing, AccessibilityService run, screenshot, or live model action;
-- chat approval UI and approval-id binding (see §6);
+- a live AccessibilityService action from the approval card on the physical phone;
+- a real screenshot upload and a live model-driven phone action;
 - frame retention/redaction and per-IP pairing rate limiting (not implemented).

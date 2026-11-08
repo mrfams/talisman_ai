@@ -1,20 +1,26 @@
 import { randomUUID } from "node:crypto";
 import type { Database } from "../db/database.js";
 import {
+  cancelPhoneApprovals,
   cancelQueuedCommands,
   claimCommand,
   claimPairingCode,
   completeCommand,
   createDevice,
+  createPhoneApproval,
+  decidePhoneApproval,
   enqueueCommand,
   getCommand,
   getDeviceById,
   getFrame,
+  getPhoneApproval,
   insertPairingCode,
   listDevices,
+  listPhoneApprovals,
   putFrame,
   touchDevice,
   updateDevice,
+  type PhoneApproval,
   type PhoneCommand,
   type PhoneDevice,
 } from "../db/phone-repos.js";
@@ -51,6 +57,28 @@ export interface PairingClaim {
   platform: PhonePlatform;
 }
 
+export interface PublicPhoneApproval {
+  id: string;
+  deviceId: string;
+  op: "act" | "flow";
+  args: Record<string, unknown>;
+  summary: string;
+  status: PhoneApproval["status"];
+  expiresAt: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface PhoneActionDecision {
+  approval: PublicPhoneApproval;
+  command: {
+    id: string;
+    status: string;
+    result: unknown;
+    error: string | null;
+  } | null;
+}
+
 export interface PublicPhoneDevice {
   id: string;
   name: string;
@@ -68,6 +96,62 @@ export interface PublicPhoneDevice {
 }
 
 const ONLINE_WINDOW_MS = 90_000;
+const APPROVAL_TTL_MS = 2 * 60_000;
+const PHONE_ACTIONS = [
+  "launch",
+  "deep_link",
+  "tap",
+  "tap_ref",
+  "long_press",
+  "type",
+  "swipe",
+  "scroll",
+  "global",
+] as const;
+
+export function publicApproval(approval: PhoneApproval): PublicPhoneApproval {
+  return {
+    id: approval.id,
+    deviceId: approval.deviceId,
+    op: approval.op,
+    args: approval.args,
+    summary: approval.summary,
+    status: approval.status,
+    expiresAt: approval.expiresAt,
+    createdAt: approval.createdAt,
+    decidedAt: approval.decidedAt,
+  };
+}
+
+function actionSummary(deviceName: string, op: "act" | "flow", args: Record<string, unknown>): string {
+  if (op === "flow") {
+    const steps = Array.isArray(args.steps) ? args.steps.length : 0;
+    return `Run a ${steps}-step action flow on ${deviceName}`;
+  }
+  const action = String(args.action ?? "action");
+  switch (action) {
+    case "launch":
+      return `Open ${String(args.package ?? "an app")} on ${deviceName}`;
+    case "deep_link":
+      return `Open ${String(args.uri ?? "a link")} on ${deviceName}`;
+    case "tap":
+      return `Tap (${Number(args.x ?? 0)}, ${Number(args.y ?? 0)}) on ${deviceName}`;
+    case "tap_ref":
+      return `Tap element ${String(args.ref ?? "")} on ${deviceName}`;
+    case "long_press":
+      return `Long-press on ${deviceName}`;
+    case "type":
+      return `Type ${String(args.text ?? "").length} characters on ${deviceName}`;
+    case "swipe":
+      return `Swipe on ${deviceName}`;
+    case "scroll":
+      return `Scroll ${String(args.direction ?? "down")} on ${deviceName}`;
+    case "global":
+      return `Press ${String(args.name ?? "a navigation button")} on ${deviceName}`;
+    default:
+      return `Run ${action} on ${deviceName}`;
+  }
+}
 
 export function publicDevice(device: PhoneDevice): PublicPhoneDevice {
   return {
@@ -224,6 +308,7 @@ export class PhoneService {
     const result = await this.database.withTenant(orgId, userId, async (conn) => {
       const updated = await updateDevice(conn, deviceId, orgId, userId, { status: "paused" });
       const cancelled = await cancelQueuedCommands(conn, deviceId);
+      await cancelPhoneApprovals(conn, deviceId);
       return { updated, cancelled };
     });
     if (!result.updated) throw errors.notFound("Phone not found");
@@ -254,6 +339,7 @@ export class PhoneService {
         revokedAt: new Date(),
       });
       const cancelled = await cancelQueuedCommands(conn, deviceId);
+      await cancelPhoneApprovals(conn, deviceId);
       return { updated, cancelled };
     });
     if (!result.updated) throw errors.notFound("Phone not found");
@@ -288,6 +374,110 @@ export class PhoneService {
     return updated;
   }
 
+  /**
+   * A human-readable, expiring request. Nothing is queued until the owner
+   * approves it, and the queued command carries the approval id plus the hash of
+   * these exact arguments.
+   */
+  async requestAction(
+    orgId: string,
+    userId: string,
+    deviceId: string,
+    input: { op: string; args: Record<string, unknown> },
+  ): Promise<PublicPhoneApproval> {
+    const device = await this.get(orgId, userId, deviceId);
+    if (device.status !== "active") {
+      throw errors.conflict(
+        device.status === "revoked"
+          ? "This phone has been revoked"
+          : "This phone is paused. Resume it first.",
+      );
+    }
+    if (input.op !== "act" && input.op !== "flow") {
+      throw errors.invalid("Only act or flow needs an approval");
+    }
+    const args =
+      input.args && typeof input.args === "object" && !Array.isArray(input.args)
+        ? input.args
+        : {};
+    if (JSON.stringify(args).length > 32_000) throw errors.invalid("Phone action is too large");
+    if (input.op === "act") {
+      const action = String(args.action ?? "");
+      if (!(PHONE_ACTIONS as readonly string[]).includes(action)) {
+        throw errors.invalid(`Unsupported phone action: ${action || "missing"}`);
+      }
+    } else if (!Array.isArray(args.steps) || args.steps.length === 0) {
+      throw errors.invalid("A flow needs at least one step");
+    }
+    const op: "act" | "flow" = input.op === "act" ? "act" : "flow";
+
+    const approval = await this.database.withTenant(orgId, userId, (conn) =>
+      createPhoneApproval(conn, {
+        id: newId(),
+        orgId,
+        userId,
+        deviceId: device.id,
+        op,
+        args,
+        argsHash: hashArgs(args),
+        summary: actionSummary(device.name, op, args).slice(0, 500),
+        expiresAt: new Date(Date.now() + APPROVAL_TTL_MS),
+      }),
+    );
+    return publicApproval(approval);
+  }
+
+  async listApprovals(
+    orgId: string,
+    userId: string,
+    status: PhoneApproval["status"] | "all" = "pending",
+  ): Promise<PublicPhoneApproval[]> {
+    const approvals = await this.database.withTenant(orgId, userId, (conn) =>
+      listPhoneApprovals(conn, orgId, userId, status),
+    );
+    return approvals.map(publicApproval);
+  }
+
+  /** Approves or refuses exactly one pending action, then queues it if allowed. */
+  async decideAction(
+    orgId: string,
+    userId: string,
+    approvalId: string,
+    decision: "approved" | "denied",
+    waitMs = 20_000,
+  ): Promise<PhoneActionDecision> {
+    const approval = await this.database.withTenant(orgId, userId, (conn) =>
+      getPhoneApproval(conn, approvalId, orgId, userId),
+    );
+    if (!approval) throw errors.notFound("Phone action not found");
+    if (approval.status !== "pending") {
+      throw errors.conflict("This phone action was already decided");
+    }
+    if (new Date(approval.expiresAt).getTime() <= Date.now()) {
+      throw errors.conflict("This phone action has expired. Ask for it again.");
+    }
+
+    const decided = await this.database.withTenant(orgId, userId, (conn) =>
+      decidePhoneApproval(conn, approvalId, orgId, userId, decision),
+    );
+    if (!decided) throw errors.conflict("This phone action was already decided");
+    if (decision === "denied") {
+      return { approval: publicApproval(decided), command: null };
+    }
+
+    const device = await this.get(orgId, userId, approval.deviceId);
+    const command = await this.enqueue(device, {
+      op: approval.op,
+      args: approval.args,
+      phoneApprovalId: approval.id,
+    });
+    const outcome = await this.awaitCommand(device, command.id, waitMs);
+    return {
+      approval: publicApproval(decided),
+      command: { id: command.id, ...outcome },
+    };
+  }
+
   async enqueue(
     device: PhoneDevice,
     input: {
@@ -296,6 +486,7 @@ export class PhoneService {
       runId?: string | null;
       stepId?: string | null;
       approvalId?: string | null;
+      phoneApprovalId?: string | null;
       idempotencyKey?: string;
       ttlMs?: number;
     },
@@ -326,6 +517,7 @@ export class PhoneService {
         runId: input.runId ?? null,
         stepId: input.stepId ?? null,
         approvalId: input.approvalId ?? null,
+        phoneApprovalId: input.phoneApprovalId ?? null,
         idempotencyKey,
         op: input.op,
         args,
@@ -431,6 +623,35 @@ export class PhoneService {
   ): Promise<Awaited<ReturnType<typeof getFrame>>> {
     await this.get(orgId, userId, deviceId);
     return this.database.withTenant(orgId, userId, (conn) => getFrame(conn, deviceId));
+  }
+
+  /** Waits for one claimed command without throwing on a phone-side error. */
+  private async awaitCommand(
+    device: PhoneDevice,
+    commandId: string,
+    timeoutMs: number,
+  ): Promise<{ status: string; result: unknown; error: string | null }> {
+    const deadline = Date.now() + Math.max(1_000, Math.min(timeoutMs, 45_000));
+    for (;;) {
+      const current = await this.database.withTenant(device.orgId, device.userId, (conn) =>
+        getCommand(conn, commandId, device.id),
+      );
+      if (!current) throw errors.unavailable("The phone command disappeared");
+      if (["done", "error", "expired", "cancelled"].includes(current.status)) {
+        return { status: current.status, result: current.result, error: current.error };
+      }
+      if (Date.now() >= deadline) {
+        return {
+          status: current.status,
+          result: null,
+          error:
+            current.status === "queued"
+              ? "The phone has not claimed the command yet"
+              : "The phone is still working on it",
+        };
+      }
+      await sleep(300);
+    }
   }
 
   /**

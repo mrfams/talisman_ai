@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  type PhoneApproval,
   type PhoneDevice,
   type PhonePairing,
   type PhoneStatus,
@@ -206,6 +207,176 @@ function PairPanel({ onClose }: { onClose?: () => void }) {
   );
 }
 
+function PhoneActions({ device, onDone }: { device: PhoneDevice; onDone: () => void }) {
+  const [apps, setApps] = useState<Array<{ package: string; label: string }> | null>(null);
+  const [selected, setSelected] = useState("");
+  const [approval, setApproval] = useState<PhoneApproval | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<{
+    tone: "neutral" | "warn" | "bad";
+    text: string;
+  } | null>(null);
+
+  async function loadApps() {
+    setBusy("apps");
+    setNote(null);
+    try {
+      const response = await api.companionOp(device.id, "apps");
+      const result = response.result as { apps?: Array<{ package?: string; label?: string }> };
+      const found = (result.apps ?? [])
+        .filter((app): app is { package: string; label?: string } => Boolean(app.package))
+        .map((app) => ({ package: app.package, label: app.label || app.package }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      setApps(found);
+      if (!found.length) setNote({ tone: "warn", text: "The phone returned no installed apps." });
+    } catch (error) {
+      setNote({ tone: "bad", text: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function request(args: Record<string, unknown>) {
+    setBusy("request");
+    setNote(null);
+    try {
+      const started = await api.requestPhoneAction(device.id, "act", args);
+      setApproval(started.approval);
+    } catch (error) {
+      setNote({ tone: "bad", text: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function decide(decision: "approved" | "denied") {
+    if (!approval) return;
+    setBusy(decision);
+    setNote(null);
+    try {
+      const result = await api.decidePhoneApproval(approval.id, decision);
+      setApproval(null);
+      if (decision === "denied") {
+        setNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
+      } else if (result.command?.status === "done") {
+        setNote({ tone: "neutral", text: "The phone completed the action." });
+        onDone();
+      } else if (result.command?.status === "error") {
+        setNote({
+          tone: "bad",
+          text: `The phone rejected it: ${result.command.error ?? "unknown error"}`,
+        });
+      } else {
+        setNote({
+          tone: "warn",
+          text: "Approved and queued. The phone has not answered yet; keep the companion open.",
+        });
+      }
+    } catch (error) {
+      setNote({ tone: "bad", text: errorMessage(error) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="panel" style={{ padding: 14 }}>
+      <div className="row-between wrap" style={{ gap: 10 }}>
+        <div>
+          <h3 className="section-title">Phone actions</h3>
+          <p className="tiny faint" style={{ margin: "4px 0 0", lineHeight: 1.5 }}>
+            A real action, not a preview. It is queued only after you press Allow once.
+          </p>
+        </div>
+        {approval ? <Badge tone="warn">Waiting for you</Badge> : null}
+      </div>
+
+      {note ? <Notice tone={note.tone}>{note.text}</Notice> : null}
+
+      {approval ? (
+        <div className="stack" style={{ gap: 10, marginTop: 12 }}>
+          <div className="small" style={{ fontWeight: 600 }}>
+            {approval.summary}
+          </div>
+          <div className="tiny faint">
+            One action only. Expires{" "}
+            {new Date(approval.expiresAt).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+            .
+          </div>
+          <div className="row wrap" style={{ gap: 8 }}>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={<ShieldCheck size={12} />}
+              busy={busy === "approved"}
+              onClick={() => void decide("approved")}
+            >
+              Allow once
+            </Button>
+            <Button
+              size="sm"
+              busy={busy === "denied"}
+              onClick={() => void decide("denied")}
+            >
+              Refuse
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="row wrap" style={{ gap: 8, marginTop: 12, alignItems: "center" }}>
+          {apps ? (
+            <>
+              <select
+                className="select"
+                aria-label="App to open"
+                value={selected}
+                onChange={(event) => setSelected(event.target.value)}
+                style={{ minWidth: 200, maxWidth: 300 }}
+              >
+                <option value="">Choose an app</option>
+                {apps.map((app) => (
+                  <option key={app.package} value={app.package}>
+                    {app.label}
+                  </option>
+                ))}
+              </select>
+              <Button
+                size="sm"
+                variant="primary"
+                busy={busy === "request"}
+                disabled={!selected || !device.online}
+                onClick={() => void request({ action: "launch", package: selected })}
+              >
+                Request open
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              busy={busy === "apps"}
+              disabled={!device.online}
+              onClick={() => void loadApps()}
+            >
+              Choose an app
+            </Button>
+          )}
+          <Button
+            size="sm"
+            busy={busy === "request"}
+            disabled={!device.online}
+            onClick={() => void request({ action: "global", name: "home" })}
+          >
+            Home
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CompanionCard({ device }: { device: PhoneDevice }) {
   const client = useQueryClient();
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -378,11 +549,13 @@ function CompanionCard({ device }: { device: PhoneDevice }) {
               </div>
             )}
             <p className="tiny faint" style={{ marginTop: 10, lineHeight: 1.5 }}>
-              Read-only. Taps and app actions must come from an approved run, never from this
-              console.
+              The screen read is read-only. Taps, app launches, and Home requests become one-shot
+              approvals before the phone executes them.
             </p>
           </div>
         </div>
+
+        <PhoneActions device={device} onDone={() => void look()} />
 
         <div className="row wrap" style={{ gap: 8, borderTop: "1px solid var(--line)", paddingTop: 12 }}>
           {device.status === "active" ? (
@@ -512,7 +685,8 @@ export function Devices() {
                 </span>
                 <span>
                   Actions that can send, pay, post, or delete require an approval bound to the exact
-                  arguments the phone will execute. The manual console in this page is read-only.
+                  arguments the phone will execute. The manual controls in this page use the same
+                  one-shot approval path; they are not a separate bypass.
                 </span>
               </div>
             </div>

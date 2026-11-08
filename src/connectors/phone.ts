@@ -55,6 +55,8 @@ export interface PhoneTransport {
   status(): Promise<PhoneStatus>;
   send(op: PhoneOp, kw?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   screenshot(signal?: AbortSignal): Promise<PhoneShot>;
+  /** Optional read-only app list. The companion implements it; legacy transports may not. */
+  listApps?(signal?: AbortSignal): Promise<Array<{ package: string; label: string }>>;
 }
 
 const CLOUD_API = "https://api.phone-harness.com";

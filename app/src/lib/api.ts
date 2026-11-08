@@ -171,6 +171,28 @@ export interface PhonePairing {
   server: string;
 }
 
+export interface PhoneApproval {
+  id: string;
+  deviceId: string;
+  op: "act" | "flow";
+  args: Record<string, unknown>;
+  summary: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  expiresAt: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface PhoneActionDecision {
+  approval: PhoneApproval;
+  command: {
+    id: string;
+    status: string;
+    result: unknown;
+    error: string | null;
+  } | null;
+}
+
 export interface DevicesResponse {
   configured: boolean;
   devices: PhoneDevice[];
@@ -323,6 +345,22 @@ export const api = {
       method: "POST",
       body: body({ op, kw }),
     }),
+  requestPhoneAction: (
+    id: string,
+    op: "act" | "flow",
+    args: Record<string, unknown> = {},
+  ) =>
+    request<{ approval: PhoneApproval }>(`/api/devices/${encodeURIComponent(id)}/actions`, {
+      method: "POST",
+      body: body({ op, args }),
+    }),
+  phoneApprovals: (status: "pending" | "approved" | "denied" | "expired" | "all" = "pending") =>
+    request<{ approvals: PhoneApproval[] }>(`/api/phone/approvals?status=${status}`),
+  decidePhoneApproval: (id: string, decision: "approved" | "denied") =>
+    request<PhoneActionDecision>(`/api/phone/approvals/${encodeURIComponent(id)}/decision`, {
+      method: "POST",
+      body: body({ decision }),
+    }),
 
   connectors: () => request<ConnectorState>("/api/connectors"),
   authorizeGoogle: () => request<{ url: string }>("/api/connectors/google/authorize"),
@@ -336,6 +374,12 @@ export const api = {
 export interface StreamHandlers {
   onText: (text: string) => void;
   onTool: (event: { phase: "start" | "end"; name: string; args?: unknown; ok?: boolean }) => void;
+  onApproval?: (approval: {
+    id: string;
+    summary: string;
+    expiresAt: string | null;
+    deviceName: string | null;
+  }) => void;
   onDone: () => void;
   onError: (message: string) => void;
 }
@@ -379,6 +423,19 @@ export async function streamMessage(
         handlers.onTool(JSON.parse(payload) as { phase: "start" | "end"; name: string });
       } catch {
         // A malformed tool frame should not kill the stream.
+      }
+    } else if (event === "approval") {
+      try {
+        handlers.onApproval?.(
+          JSON.parse(payload) as {
+            id: string;
+            summary: string;
+            expiresAt: string | null;
+            deviceName: string | null;
+          },
+        );
+      } catch {
+        // A malformed approval frame should not kill the stream.
       }
     } else if (event === "done") {
       finished = true;

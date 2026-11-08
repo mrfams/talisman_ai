@@ -43,6 +43,21 @@ export interface PhoneDevice {
   revokedAt: string | null;
 }
 
+export interface PhoneApproval {
+  id: string;
+  orgId: string;
+  userId: string;
+  deviceId: string;
+  op: "act" | "flow";
+  args: Record<string, unknown>;
+  argsHash: string;
+  summary: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  decidedAt: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
 export interface PhoneCommand {
   id: string;
   orgId: string;
@@ -100,7 +115,26 @@ function mapDevice(row: Row): PhoneDevice {
   };
 }
 
+function mapApproval(row: Row): PhoneApproval {
+  return {
+    id: String(row.id),
+    orgId: String(row.org_id),
+    userId: String(row.user_id),
+    deviceId: String(row.device_id),
+    op: row.op as PhoneApproval["op"],
+    args: objectOrEmpty(row.args),
+    argsHash: String(row.args_hash),
+    summary: String(row.summary),
+    status: row.status as PhoneApproval["status"],
+    decidedAt: isoOrNull(row.decided_at),
+    expiresAt: iso(row.expires_at),
+    createdAt: iso(row.created_at),
+  };
+}
+
 function mapCommand(row: Row): PhoneCommand {
+  const approvalId =
+    row.phone_approval_id ?? row.approval_id;
   return {
     id: String(row.id),
     orgId: String(row.org_id),
@@ -109,9 +143,7 @@ function mapCommand(row: Row): PhoneCommand {
     runId: row.run_id === null || row.run_id === undefined ? null : String(row.run_id),
     stepId: row.step_id === null || row.step_id === undefined ? null : String(row.step_id),
     approvalId:
-      row.approval_id === null || row.approval_id === undefined
-        ? null
-        : String(row.approval_id),
+      approvalId === null || approvalId === undefined ? null : String(approvalId),
     idempotencyKey: String(row.idempotency_key),
     op: String(row.op),
     args: objectOrEmpty(row.args),
@@ -290,6 +322,116 @@ export async function touchDevice(conn: Conn, id: string): Promise<void> {
   );
 }
 
+/* ------------------------------------------------------------- approvals */
+
+export async function createPhoneApproval(
+  conn: Conn,
+  input: {
+    id: string;
+    orgId: string;
+    userId: string;
+    deviceId: string;
+    op: "act" | "flow";
+    args: Record<string, unknown>;
+    argsHash: string;
+    summary: string;
+    expiresAt: Date;
+  },
+): Promise<PhoneApproval> {
+  const { rows } = await conn.query<Row>(
+    `INSERT INTO phone_approvals
+       (id, org_id, user_id, device_id, op, args, args_hash, summary, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+     RETURNING *`,
+    [
+      input.id,
+      input.orgId,
+      input.userId,
+      input.deviceId,
+      input.op,
+      JSON.stringify(input.args),
+      input.argsHash,
+      input.summary,
+      input.expiresAt,
+    ],
+  );
+  return mapApproval(rows[0]!);
+}
+
+export async function getPhoneApproval(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+): Promise<PhoneApproval | null> {
+  const { rows } = await conn.query<Row>(
+    "SELECT * FROM phone_approvals WHERE id = $1 AND org_id = $2 AND user_id = $3",
+    [id, orgId, userId],
+  );
+  return rows[0] ? mapApproval(rows[0]) : null;
+}
+
+export async function listPhoneApprovals(
+  conn: Conn,
+  orgId: string,
+  userId: string,
+  status: PhoneApproval["status"] | "all" = "pending",
+  limit = 50,
+): Promise<PhoneApproval[]> {
+  await conn.query(
+    "UPDATE phone_approvals SET status = 'expired' WHERE status = 'pending' AND expires_at <= now()",
+  );
+  const bounded = Math.max(1, Math.min(limit, 100));
+  const { rows } =
+    status === "all"
+      ? await conn.query<Row>(
+          `SELECT * FROM phone_approvals
+            WHERE org_id = $1 AND user_id = $2
+            ORDER BY created_at DESC LIMIT $3`,
+          [orgId, userId, bounded],
+        )
+      : await conn.query<Row>(
+          `SELECT * FROM phone_approvals
+            WHERE org_id = $1 AND user_id = $2 AND status = $3
+            ORDER BY created_at DESC LIMIT $4`,
+          [orgId, userId, status, bounded],
+        );
+  return rows.map(mapApproval);
+}
+
+/** Only a pending, unexpired request can be decided. */
+export async function decidePhoneApproval(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+  decision: "approved" | "denied",
+): Promise<PhoneApproval | null> {
+  const { rows } = await conn.query<Row>(
+    `UPDATE phone_approvals
+        SET status = $4, decided_at = now()
+      WHERE id = $1 AND org_id = $2 AND user_id = $3
+        AND status = 'pending' AND expires_at > now()
+      RETURNING *`,
+    [id, orgId, userId, decision],
+  );
+  return rows[0] ? mapApproval(rows[0]) : null;
+}
+
+/** Pausing or revoking a phone must also kill its pending action requests. */
+export async function cancelPhoneApprovals(
+  conn: Conn,
+  deviceId: string,
+): Promise<number> {
+  const { rows } = await conn.query<Row>(
+    `UPDATE phone_approvals SET status = 'expired'
+      WHERE device_id = $1 AND status = 'pending'
+      RETURNING id`,
+    [deviceId],
+  );
+  return rows.length;
+}
+
 /* -------------------------------------------------------------- commands */
 
 export async function enqueueCommand(
@@ -302,6 +444,7 @@ export async function enqueueCommand(
     runId?: string | null;
     stepId?: string | null;
     approvalId?: string | null;
+    phoneApprovalId?: string | null;
     idempotencyKey: string;
     op: string;
     args: Record<string, unknown>;
@@ -311,9 +454,9 @@ export async function enqueueCommand(
 ): Promise<PhoneCommand> {
   const { rows } = await conn.query<Row>(
     `INSERT INTO phone_commands
-       (id, org_id, user_id, device_id, run_id, step_id, approval_id, idempotency_key,
-        op, args, args_hash, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12)
+       (id, org_id, user_id, device_id, run_id, step_id, approval_id, phone_approval_id,
+        idempotency_key, op, args, args_hash, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13)
      ON CONFLICT (device_id, idempotency_key) DO NOTHING
      RETURNING *`,
     [
@@ -324,6 +467,7 @@ export async function enqueueCommand(
       input.runId ?? null,
       input.stepId ?? null,
       input.approvalId ?? null,
+      input.phoneApprovalId ?? null,
       input.idempotencyKey,
       input.op,
       JSON.stringify(input.args),

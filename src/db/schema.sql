@@ -246,6 +246,26 @@ CREATE TABLE IF NOT EXISTS phone_devices (
 CREATE INDEX IF NOT EXISTS phone_devices_user_idx
   ON phone_devices (org_id, user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS phone_approvals (
+  id text PRIMARY KEY,
+  org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id text NOT NULL REFERENCES phone_devices(id) ON DELETE CASCADE,
+  op text NOT NULL CHECK (op IN ('act','flow')),
+  args jsonb NOT NULL DEFAULT '{}'::jsonb,
+  args_hash text NOT NULL,
+  summary text NOT NULL,
+  status text NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','approved','denied','expired')),
+  decided_at timestamptz,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS phone_approvals_pending_idx
+  ON phone_approvals (org_id, user_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS phone_approvals_device_idx
+  ON phone_approvals (device_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS phone_commands (
   id text PRIMARY KEY,
   org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -254,6 +274,7 @@ CREATE TABLE IF NOT EXISTS phone_commands (
   run_id text REFERENCES tasks(id) ON DELETE SET NULL,
   step_id text REFERENCES task_steps(id) ON DELETE SET NULL,
   approval_id text REFERENCES approvals(id) ON DELETE SET NULL,
+  phone_approval_id text REFERENCES phone_approvals(id) ON DELETE SET NULL,
   idempotency_key text NOT NULL,
   op text NOT NULL CHECK (op IN ('observe','act','flow','apps','status')),
   args jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -273,6 +294,13 @@ CREATE INDEX IF NOT EXISTS phone_commands_queue_idx
   ON phone_commands (device_id, status, created_at)
   WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS phone_commands_run_idx ON phone_commands (run_id);
+-- Existing deployments predate the phone-approval queue. The task approval
+-- column stays for task-scoped work; phone actions use their own binding.
+ALTER TABLE phone_commands
+  ADD COLUMN IF NOT EXISTS phone_approval_id text
+  REFERENCES phone_approvals(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS phone_commands_phone_approval_idx
+  ON phone_commands (phone_approval_id);
 
 -- Latest frame per device. Overwritten, never a history.
 CREATE TABLE IF NOT EXISTS phone_frames (
@@ -294,7 +322,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'conversations','messages','tasks','task_steps','task_events',
     'approvals','artifacts','artifact_blobs','memories','audit_events',
-    'provider_credentials','phone_commands','phone_frames'
+    'provider_credentials','phone_approvals','phone_commands','phone_frames'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);

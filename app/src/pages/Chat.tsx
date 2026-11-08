@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, ArrowUp, Check, MessageSquarePlus, Square, Wrench } from "lucide-react";
-import { api, streamMessage, type StoredMessage } from "../lib/api";
+import { ArrowRight, ArrowUp, Check, MessageSquarePlus, Square, Wrench, X } from "lucide-react";
+import { api, streamMessage, type PhoneApproval, type StoredMessage } from "../lib/api";
 import { errorMessage, useConversations, useMessages } from "../lib/queries";
 import { Button, Markdown, Notice, Skeleton, timeAgo } from "../ui";
 import { BrandMark } from "../BrandMark";
@@ -32,6 +32,12 @@ export function Chat() {
   const [draft, setDraft] = useState(() => params.get("q") ?? "");
   const [liveText, setLiveText] = useState("");
   const [tools, setTools] = useState<{ name: string; phase: "start" | "end" }[]>([]);
+  const [phoneApprovals, setPhoneApprovals] = useState<PhoneApproval[]>([]);
+  const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
+  const [approvalNote, setApprovalNote] = useState<{
+    tone: "neutral" | "warn" | "bad";
+    text: string;
+  } | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -71,6 +77,8 @@ export function Chat() {
     setPending(body);
     setLiveText("");
     setTools([]);
+    setPhoneApprovals([]);
+    setApprovalNote(null);
 
     let conversationId = id;
     try {
@@ -90,6 +98,22 @@ export function Chat() {
           onText: (chunk) => setLiveText((current) => current + chunk),
           onTool: (event) =>
             setTools((current) => [...current, { name: event.name, phase: event.phase }]),
+          onApproval: (approval) => {
+            setPhoneApprovals((current) => [
+              ...current.filter((item) => item.id !== approval.id),
+              {
+                id: approval.id,
+                deviceId: "",
+                op: "act",
+                args: {},
+                summary: approval.summary,
+                status: "pending",
+                expiresAt: approval.expiresAt ?? new Date().toISOString(),
+                createdAt: new Date().toISOString(),
+                decidedAt: null,
+              },
+            ]);
+          },
           onDone: () => undefined,
           onError: (message) => setProblem(message),
         },
@@ -114,6 +138,34 @@ export function Chat() {
   function stop() {
     abort.current?.abort();
     setSending(false);
+  }
+
+  async function decidePhoneApproval(id: string, decision: "approved" | "denied") {
+    setApprovalBusy(id);
+    setApprovalNote(null);
+    try {
+      const result = await api.decidePhoneApproval(id, decision);
+      setPhoneApprovals((current) => current.filter((item) => item.id !== id));
+      if (decision === "denied") {
+        setApprovalNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
+      } else if (result.command?.status === "done") {
+        setApprovalNote({ tone: "neutral", text: "Approved and completed on the phone." });
+      } else if (result.command?.status === "error") {
+        setApprovalNote({
+          tone: "bad",
+          text: `Approved, but the phone returned an error: ${result.command.error ?? "unknown"}`,
+        });
+      } else {
+        setApprovalNote({
+          tone: "warn",
+          text: "Approved and queued. The phone has not answered yet; keep the companion open.",
+        });
+      }
+    } catch (error) {
+      setApprovalNote({ tone: "bad", text: errorMessage(error) });
+    } finally {
+      setApprovalBusy(null);
+    }
   }
 
   const empty = shown.length === 0 && !pending && !liveText;
@@ -289,6 +341,50 @@ export function Chat() {
                 Thinking
               </div>
             ) : null}
+
+            {phoneApprovals.length ? (
+              <div className="stack" style={{ gap: 8, paddingLeft: 34 }}>
+                {phoneApprovals.map((approval) => (
+                  <div key={approval.id} className="panel" style={{ padding: 12 }}>
+                    <div className="row-between wrap" style={{ gap: 10 }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="small" style={{ fontWeight: 600 }}>
+                          {approval.summary}
+                        </div>
+                        <div className="tiny faint" style={{ marginTop: 3 }}>
+                          Phone approval · one action only · expires{" "}
+                          {new Date(approval.expiresAt).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </div>
+                      </div>
+                      <div className="row" style={{ gap: 6 }}>
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          icon={<Check size={12} />}
+                          busy={approvalBusy === approval.id}
+                          onClick={() => void decidePhoneApproval(approval.id, "approved")}
+                        >
+                          Allow once
+                        </Button>
+                        <Button
+                          size="sm"
+                          icon={<X size={12} />}
+                          busy={approvalBusy === approval.id}
+                          onClick={() => void decidePhoneApproval(approval.id, "denied")}
+                        >
+                          Refuse
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {approvalNote ? <Notice tone={approvalNote.tone}>{approvalNote.text}</Notice> : null}
 
             {problem ? <Notice tone="bad">{problem}</Notice> : null}
           </div>

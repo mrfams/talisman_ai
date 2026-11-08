@@ -132,16 +132,24 @@ export class CompanionPhone implements PhoneTransport {
     }
   }
 
+  async listApps(signal?: AbortSignal): Promise<Array<{ package: string; label: string }>> {
+    if (signal?.aborted) throw errors.unavailable("The phone request was cancelled");
+    const result = (await this.service.execute(this.device, "apps", {})) as {
+      apps?: Array<{ package?: string; label?: string }>;
+    };
+    return (result.apps ?? [])
+      .filter((app): app is { package: string; label?: string } => Boolean(app.package))
+      .map((app) => ({ package: app.package, label: app.label || app.package }));
+  }
+
   private async launch(name: string): Promise<unknown> {
     if (!name.trim()) throw errors.invalid("An app name or package is required");
     if (name.includes(".")) {
       return this.service.execute(this.device, "act", { action: "launch", package: name });
     }
-    const apps = (await this.service.execute(this.device, "apps", {})) as {
-      apps?: Array<{ package?: string; label?: string }>;
-    };
+    const apps = await this.listApps();
     const wanted = name.trim().toLowerCase();
-    const match = (apps.apps ?? []).find(
+    const match = apps.find(
       (app) =>
         String(app.label ?? "").toLowerCase() === wanted ||
         String(app.label ?? "").toLowerCase().includes(wanted) ||

@@ -1,13 +1,54 @@
 import type { AgentTool } from "../intelligence/agent.js";
 import type { PhoneTransport } from "./phone.js";
 
+export interface PhoneApprovalRequest {
+  op: "act" | "flow";
+  args: Record<string, unknown>;
+}
+
+export interface PhoneApprovalRequestResult {
+  approvalId: string;
+  summary: string;
+  expiresAt: string;
+}
+
+type Ask = (input: PhoneApprovalRequest) => Promise<PhoneApprovalRequestResult>;
+
 /**
- * Agent tools over phone ops. Anything that can send, submit, pay or delete is
- * marked `requiresApproval`; the agent run denies those unless a decision was
- * granted. Reads never ask.
+ * Agent tools over phone ops. Reads are direct. Anything that changes the phone,
+ * including navigation and opening an app, becomes a durable approval request:
+ * the tool returns immediately with an approval card, and the command is only
+ * queued after the owner decides. This is why the tools do not set
+ * `requiresApproval` themselves: the approval is the tool's output, not a gate
+ * that blocks it.
  */
-export function phoneTools({ phone }: { phone: PhoneTransport | null }): AgentTool[] {
+export function phoneTools({
+  phone,
+  requestApproval,
+}: {
+  phone: PhoneTransport | null;
+  requestApproval?: Ask;
+}): AgentTool[] {
   if (!phone) return [];
+
+  const ask: Ask = async (input) => {
+    if (!requestApproval) {
+      throw new Error("Phone actions need an approval channel, and none is configured.");
+    }
+    return requestApproval(input);
+  };
+
+  const approval = async (op: "act" | "flow", args: Record<string, unknown>) => {
+    const requested = await ask({ op, args });
+    return {
+      status: "approval_required" as const,
+      approval_id: requested.approvalId,
+      summary: requested.summary,
+      expires_at: requested.expiresAt,
+      message:
+        "No action has run yet. The user must approve the card on screen; do not claim it happened.",
+    };
+  };
 
   const textBoxes = async (signal: AbortSignal) => {
     const result = await phone.send("screen.text", {}, signal);
@@ -45,7 +86,7 @@ export function phoneTools({ phone }: { phone: PhoneTransport | null }): AgentTo
       definition: {
         name: "phone_tap_text",
         description:
-          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Asks for approval because a tap can send or submit.",
+          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Creates an approval card; the tap runs only after the user approves it.",
         parameters: {
           type: "object",
           properties: {
@@ -55,7 +96,6 @@ export function phoneTools({ phone }: { phone: PhoneTransport | null }): AgentTo
           required: ["text"],
         },
       },
-      requiresApproval: true,
       execute: async (args, context) => {
         const query = String(args.text ?? "").trim();
         if (!query) return { error: "text is required" };
@@ -70,57 +110,66 @@ export function phoneTools({ phone }: { phone: PhoneTransport | null }): AgentTo
         if (!target) return { error: `No visible text matching “${query}”`, count: matches.length };
         const x = Number(target.x ?? 0) + Number(target.w ?? 0) / 2;
         const y = Number(target.y ?? 0) + Number(target.h ?? 0) / 2;
-        await phone.send("input.tap", { x: Math.round(x), y: Math.round(y) }, context.signal);
-        return { tapped: query, at: { x: Math.round(x), y: Math.round(y) } };
+        return approval("act", {
+          action: "tap",
+          x: Math.round(x),
+          y: Math.round(y),
+        });
       },
     },
     {
       definition: {
         name: "phone_type",
         description:
-          "Type into the focused field on the phone. Asks for approval, and must never be used for a password or one-time code.",
+          "Type into the focused field on the phone. Creates an approval card and must never be used for a password or one-time code.",
         parameters: {
           type: "object",
           properties: { text: { type: "string" } },
           required: ["text"],
         },
       },
-      requiresApproval: true,
-      execute: async (args, context) => {
+      execute: async (args) => {
         const text = String(args.text ?? "");
         if (!text) return { error: "text is required" };
-        await phone.send("input.text", { text }, context.signal);
-        return { typed: text.length };
+        return approval("act", { action: "type", text });
       },
     },
     {
       definition: {
         name: "phone_open_app",
-        description: "Open an app on the phone by name, for example “Messages” or “Maps”.",
+        description:
+          "Open an app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it.",
         parameters: {
           type: "object",
           properties: { name: { type: "string" } },
           required: ["name"],
         },
       },
-      requiresApproval: true,
       execute: async (args, context) => {
         const name = String(args.name ?? "").trim();
         if (!name) return { error: "name is required" };
-        const launched = await phone.send("apps.launch", { name }, context.signal);
-        return { launched: launched ?? name };
+        if (name.includes(".")) return approval("act", { action: "launch", package: name });
+
+        const apps = phone.listApps ? await phone.listApps(context.signal) : [];
+        const wanted = name.toLowerCase();
+        const match = apps.find(
+          (app) =>
+            app.label.toLowerCase() === wanted ||
+            app.label.toLowerCase().includes(wanted) ||
+            app.package.toLowerCase() === wanted,
+        );
+        if (!match) return { error: `No app named “${name}” is visible on the phone` };
+        return approval("act", { action: "launch", package: match.package });
       },
     },
     {
       definition: {
         name: "phone_home",
-        description: "Go to the phone's home screen.",
+        description:
+          "Go to the phone's home screen. Creates an approval card because it changes what is on screen.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
       },
-      execute: async (_args, context) => {
-        await phone.send("nav.home", {}, context.signal);
-        return { ok: true };
-      },
+      execute: async () => approval("act", { action: "global", name: "home" }),
     },
   ];
 }

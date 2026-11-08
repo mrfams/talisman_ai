@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { makeDatabase, makeUser, makeConfig, makeDataDir } from "./helpers.js";
+import { makeDatabase, makeUser, makeConfig, makeDataDir, sleep } from "./helpers.js";
 import { AuthService } from "../src/auth/service.js";
 import { createApp } from "../src/api/app.js";
 import { ArtifactStore } from "../src/workspace/workspace.js";
@@ -248,6 +248,118 @@ test("pause cancels queued work, rotate kills the old token, and revoke is termi
       headers: { authorization: `Bearer ${rotation.token}` },
     });
     assert.equal(poll.status, 401);
+  } finally {
+    await database.close();
+  }
+});
+
+test("phone actions need an approval bound to the queued arguments", async () => {
+  const database = await makeDatabase();
+  const dataDir = await makeDataDir();
+  try {
+    const { app, config } = appFor(database, dataDir);
+    const alice = await makeUser(database);
+    const bob = await makeUser(database);
+    const { deviceId, token } = await pair(app, alice.token);
+    const service = new PhoneService(database, config.publicUrl);
+    const device = await service.activeDevice(alice.user.orgId, alice.user.id);
+    assert.ok(device);
+
+    const args = { action: "launch", package: "com.android.settings" };
+    const requested = await app.request(`/api/devices/${deviceId}/actions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ op: "act", args }),
+    });
+    const requestedText = await requested.text();
+    assert.equal(requested.status, 201, requestedText);
+    const { approval } = JSON.parse(requestedText) as {
+      approval: { id: string; status: string; args: Record<string, unknown> };
+    };
+    assert.equal(approval.status, "pending");
+    assert.deepEqual(approval.args, args);
+
+    const queued = await database.withTenant(alice.user.orgId, alice.user.id, (conn) =>
+      conn.query<{ n: number }>("SELECT count(*)::int AS n FROM phone_commands"),
+    );
+    assert.equal(queued.rows[0]?.n, 0, "requesting an approval must not queue the action");
+
+    const foreign = await app.request(`/api/phone/approvals/${approval.id}/decision`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${bob.token}`,
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    });
+    assert.equal(foreign.status, 404, "another tenant must not decide this action");
+
+    const pending = app.request(`/api/phone/approvals/${approval.id}/decision`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ decision: "approved" }),
+    });
+    await sleep(150);
+    const command = await service.poll(device!, 2_000);
+    assert.ok(command, "approval must queue a claimable command");
+    assert.equal(command!.op, "act");
+    assert.equal(command!.approvalId, approval.id);
+    assert.equal(command!.argsHash, hashArgs(args));
+    assert.deepEqual(command!.args, args);
+
+    const completed = await app.request("/api/phone/agent/result", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        command_id: command!.id,
+        status: "done",
+        result: { ok: true, action: "launch" },
+      }),
+    });
+    assert.equal(completed.status, 200, await completed.text());
+
+    const decided = await pending;
+    const decidedText = await decided.text();
+    assert.equal(decided.status, 200, decidedText);
+    const outcome = JSON.parse(decidedText) as {
+      approval: { status: string };
+      command: { status: string; result: unknown } | null;
+    };
+    assert.equal(outcome.approval.status, "approved");
+    assert.equal(outcome.command?.status, "done");
+    assert.deepEqual(outcome.command?.result, { ok: true, action: "launch" });
+
+    const second = await app.request(`/api/devices/${deviceId}/actions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ op: "act", args: { action: "global", name: "home" } }),
+    });
+    const secondApproval = (await second.json()) as { approval: { id: string } };
+    const denied = await app.request(`/api/phone/approvals/${secondApproval.approval.id}/decision`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${alice.token}`,
+      },
+      body: JSON.stringify({ decision: "denied" }),
+    });
+    assert.equal(denied.status, 200);
+    const after = await database.withTenant(alice.user.orgId, alice.user.id, (conn) =>
+      conn.query<{ n: number }>("SELECT count(*)::int AS n FROM phone_commands"),
+    );
+    assert.equal(after.rows[0]?.n, 1, "a refused action must not queue a command");
   } finally {
     await database.close();
   }

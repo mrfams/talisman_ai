@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { BridgePhone, CloudPhone, isPhoneOp, type PhoneTransport } from "../src/connectors/phone.js";
-import { phoneTools } from "../src/connectors/phone-tools.js";
+import { phoneTools, type PhoneApprovalRequest } from "../src/connectors/phone-tools.js";
 
 interface Recorded {
   method: string;
@@ -153,21 +153,37 @@ test("phone tools ask for approval before they touch the phone", async () => {
     },
   };
 
-  const tools = phoneTools({ phone });
+  const requested: PhoneApprovalRequest[] = [];
+  const tools = phoneTools({
+    phone,
+    requestApproval: async (input) => {
+      requested.push(input);
+      return {
+        approvalId: `approval-${requested.length}`,
+        summary: "Test approval",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      };
+    },
+  });
   const byName = new Map(tools.map((tool) => [tool.definition.name, tool]));
-  assert.equal(byName.get("phone_tap_text")?.requiresApproval, true);
-  assert.equal(byName.get("phone_type")?.requiresApproval, true);
-  assert.equal(byName.get("phone_open_app")?.requiresApproval, true);
+  assert.equal(byName.get("phone_tap_text")?.requiresApproval ?? false, false);
+  assert.equal(byName.get("phone_type")?.requiresApproval ?? false, false);
+  assert.equal(byName.get("phone_open_app")?.requiresApproval ?? false, false);
   assert.equal(byName.get("phone_look")?.requiresApproval ?? false, false);
 
   const tap = byName.get("phone_tap_text")!;
   const result = (await tap.execute(
     { text: "send" },
     { signal: new AbortController().signal, callId: "call-1" },
-  )) as { tapped: string; at: { x: number; y: number } };
-  assert.equal(result.tapped, "send");
-  assert.deepEqual(result.at, { x: 120, y: 210 });
-  assert.deepEqual(sent.at(-1), { op: "input.tap", kw: { x: 120, y: 210 } });
+  )) as { status: string; approval_id: string };
+  assert.equal(result.status, "approval_required");
+  assert.equal(result.approval_id, "approval-1");
+  assert.deepEqual(requested[0], { op: "act", args: { action: "tap", x: 120, y: 210 } });
+  assert.equal(
+    sent.some((call) => call.op === "input.tap"),
+    false,
+    "a tap must not reach the phone before approval",
+  );
 
   const look = byName.get("phone_look")!;
   const screen = (await look.execute(
@@ -176,6 +192,18 @@ test("phone tools ask for approval before they touch the phone", async () => {
   )) as { app: string; count: number };
   assert.equal(screen.app, "Messages");
   assert.equal(screen.count, 2);
+
+  const withoutChannel = phoneTools({ phone }).find(
+    (tool) => tool.definition.name === "phone_home",
+  )!;
+  await assert.rejects(
+    () =>
+      withoutChannel.execute(
+        {},
+        { signal: new AbortController().signal, callId: "call-3" },
+      ),
+    /approval channel/,
+  );
 
   assert.equal(phoneTools({ phone: null }).length, 0);
   assert.equal(isPhoneOp("input.tap"), true);

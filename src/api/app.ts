@@ -463,6 +463,53 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.json({ result });
   });
 
+  app.post("/api/devices/:id/actions", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const body = z
+      .object({
+        op: z.enum(["act", "flow"]),
+        args: z.record(z.string(), z.unknown()).default({}),
+      })
+      .parse(await c.req.json());
+    const approval = await phoneService.requestAction(user.orgId, user.id, id, body);
+    await audit(deps, { user, expiresAt: "" }, "phone.action.request", "phone", id, {
+      op: body.op,
+      approvalId: approval.id,
+    });
+    return c.json({ approval }, 201);
+  });
+
+  app.get("/api/phone/approvals", async (c) => {
+    const { user } = requireUser(c);
+    const status = c.req.query("status") ?? "pending";
+    if (!["pending", "approved", "denied", "expired", "all"].includes(status)) {
+      throw errors.invalid("Unknown approval status");
+    }
+    const approvals = await phoneService.listApprovals(
+      user.orgId,
+      user.id,
+      status as "pending" | "approved" | "denied" | "expired" | "all",
+    );
+    return c.json({ approvals });
+  });
+
+  app.post("/api/phone/approvals/:id/decision", async (c) => {
+    const { user } = requireUser(c);
+    const id = param(c, "id");
+    const body = decisionBody.parse(await c.req.json());
+    const result = await phoneService.decideAction(
+      user.orgId,
+      user.id,
+      id,
+      body.decision,
+    );
+    await audit(deps, { user, expiresAt: "" }, `phone.action.${body.decision}`, "phone_action", id, {
+      commandId: result.command?.id ?? null,
+    });
+    return c.json(result);
+  });
+
   const authenticatedDevice = async (c: AppContext) => {
     const device = await phoneService.authenticate(c.req.header("authorization"));
     if (!device) throw errors.unauthorized("This phone is not paired or the token was revoked");
@@ -686,18 +733,19 @@ export function createApp(deps: AppDeps): Hono<Env> {
         content: content?.text ?? (typeof message.content === "string" ? message.content : null),
       };
     });
-    const messages = buildContext({
-      system:
-        "You are Talisman, a personal AI agent. You can create durable tasks that run in a real browser, and remember facts the user shares. Use tools when the user asks for work that should continue in the background.",
-      memories: selectMemories(memories, body.content),
-      history: chatHistory,
-      budgetTokens: 24_000,
-    });
-
     const companionDevice = await phoneService
       .activeDevice(user.orgId, user.id)
       .catch(() => null);
     const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
+    const phoneContext = companionDevice
+      ? ` A paired Android phone named "${companionDevice.name}" is connected. Use phone_look before acting. phone_tap_text, phone_type, phone_open_app, and phone_home only create an approval card; no action runs until the user approves it. Never say a phone action succeeded until the tool returns an executed result.`
+      : "";
+    const messages = buildContext({
+      system: `You are Talisman, a personal AI agent. You can create durable tasks that run in a real browser, and remember facts the user shares. Use tools when the user asks for work that should continue in the background.${phoneContext}`,
+      memories: selectMemories(memories, body.content),
+      history: chatHistory,
+      budgetTokens: 24_000,
+    });
     const tools: AgentTool[] = [
       {
         definition: {
@@ -777,7 +825,24 @@ export function createApp(deps: AppDeps): Hono<Env> {
         orgId: user.orgId,
         userId: user.id,
       }),
-      ...phoneTools({ phone: chatPhone }),
+      ...phoneTools({
+        phone: chatPhone,
+        requestApproval: companionDevice
+          ? async (input) => {
+              const requested = await phoneService.requestAction(
+                user.orgId,
+                user.id,
+                companionDevice.id,
+                input,
+              );
+              return {
+                approvalId: requested.id,
+                summary: requested.summary,
+                expiresAt: requested.expiresAt,
+              };
+            }
+          : undefined,
+      }),
     ];
 
     const agent = new Agent(deps.models, tools);
@@ -798,6 +863,28 @@ export function createApp(deps: AppDeps): Hono<Env> {
                 data: JSON.stringify({ phase: "start", name: event.name, args: event.args }),
               });
             } else if (event.type === "tool_end") {
+              const result = event.result as
+                | {
+                    status?: string;
+                    approval_id?: string;
+                    summary?: string;
+                    expires_at?: string;
+                  }
+                | null;
+              if (
+                result?.status === "approval_required" &&
+                typeof result.approval_id === "string"
+              ) {
+                await stream.writeSSE({
+                  event: "approval",
+                  data: JSON.stringify({
+                    id: result.approval_id,
+                    summary: result.summary ?? "Phone action",
+                    expiresAt: result.expires_at ?? null,
+                    deviceName: companionDevice?.name ?? null,
+                  }),
+                });
+              }
               await stream.writeSSE({
                 event: "tool",
                 data: JSON.stringify({ phase: "end", name: event.name, ok: event.ok }),
