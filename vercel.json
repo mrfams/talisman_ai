@@ -12,7 +12,12 @@
       "includeFiles": "src/db/schema.sql"
     }
   },
-  "crons": [{ "path": "/api/internal/tick", "schedule": "0 6 * * *" }],
+  "schedules": {
+    "scheduler-tick": {
+      "schedule": "*/15 * * * *",
+      "path": "/api/internal/tick"
+    }
+  },
   "headers": [
     {
       "source": "/assets/(.*)",
