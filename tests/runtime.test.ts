@@ -276,6 +276,23 @@ test("a schedule skips a due occurrence while its previous run is active", async
     assert.ok(state?.lastSkippedAt);
     assert.match(state?.lastSkipReason ?? "", /still queued/i);
     assert.ok(new Date(state!.nextRunAt).getTime() > Date.now());
+
+    await database.withTenant(user.orgId, user.id, async (conn) => {
+      await updateTask(conn, first.scheduled[0]!.taskId, {
+        status: "cancelled",
+        finishedAt: new Date(),
+      });
+      await conn.query("UPDATE schedules SET next_run_at = now() - interval '1 second' WHERE id = $1", [
+        schedule.id,
+      ]);
+    });
+    const third = await runDueSchedules(database);
+    assert.equal(third.scheduled.length, 1);
+    const after = await database.withTenant(user.orgId, user.id, (conn) =>
+      getSchedule(conn, schedule.id, user.orgId, user.id),
+    );
+    assert.equal(after?.lastSkippedAt, null);
+    assert.equal(after?.lastSkipReason, null);
   } finally {
     await database.close();
   }

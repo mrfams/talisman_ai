@@ -176,6 +176,9 @@ export async function runDueSchedules(
           lastRunAt: now,
           nextRunAt: next,
           lastTaskId: task.id,
+          // A successful occurrence supersedes any older skip notice.
+          lastSkippedAt: null,
+          lastSkipReason: null,
         });
         dispatched.push({
           scheduleId: schedule.id,
