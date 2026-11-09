@@ -141,6 +141,11 @@ function PendingPhoneApprovals({ devices }: { devices: PhoneDevice[] }) {
       await client.invalidateQueries({ queryKey: ["notifications"] });
       if (input.decision === "denied") {
         setNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
+      } else if (result.task) {
+        setNote({
+          tone: "neutral",
+          text: "Task approved. Talisman is reading the phone screen and choosing the next action.",
+        });
       } else if (result.command?.status === "done") {
         setNote({ tone: "neutral", text: "The phone completed the approved plan." });
       } else if (result.command?.status === "error") {
@@ -167,7 +172,7 @@ function PendingPhoneApprovals({ devices }: { devices: PhoneDevice[] }) {
           </span>
           <div>
             <div className="provider-name">Phone approvals</div>
-            <div className="tiny faint">One approval covers the exact plan below.</div>
+            <div className="tiny faint">One approval covers the task or the exact plan below.</div>
           </div>
         </div>
         {approvals.length ? <Badge tone="warn">{approvals.length} waiting</Badge> : null}
@@ -186,7 +191,10 @@ function PendingPhoneApprovals({ devices }: { devices: PhoneDevice[] }) {
                     {approval.summary}
                   </div>
                   <div className="tiny faint" style={{ marginTop: 3 }}>
-                    {device?.name ?? "Paired phone"} · expires{" "}
+                    {approval.op === "task"
+                      ? "Autonomous task · Talisman chooses each action"
+                      : "Exact plan"}{" "}
+                    · {device?.name ?? "Paired phone"} · expires{" "}
                     {new Date(approval.expiresAt).toLocaleTimeString([], {
                       hour: "2-digit",
                       minute: "2-digit",
@@ -211,7 +219,7 @@ function PendingPhoneApprovals({ devices }: { devices: PhoneDevice[] }) {
                       decide.mutate({ id: approval.id, decision: "approved" });
                     }}
                   >
-                    Allow once
+                    {approval.op === "task" ? "Allow task" : "Allow once"}
                   </Button>
                   <Button
                     size="sm"

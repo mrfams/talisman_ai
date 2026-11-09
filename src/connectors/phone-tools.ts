@@ -91,7 +91,7 @@ export function phoneTools({
       definition: {
         name: "phone_tap_text",
         description:
-          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Creates an approval card; the tap runs only after the user approves it. For a task with more than one action, use phone_plan once instead of separate taps.",
+          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Creates an approval card; the tap runs only after the user approves it. For a task with more than one action, use phone_task_start instead of separate taps.",
         parameters: {
           type: "object",
           properties: {
@@ -126,7 +126,7 @@ export function phoneTools({
       definition: {
         name: "phone_type",
         description:
-          "Type into the focused field on the phone. Creates an approval card and must never be used for a password or one-time code. For a task with more than one action, use phone_plan once instead of separate actions.",
+          "Type into the focused field on the phone. Creates an approval card and must never be used for a password or one-time code. For a task with more than one action, use phone_task_start instead of separate actions.",
         parameters: {
           type: "object",
           properties: { text: { type: "string" } },
@@ -173,7 +173,7 @@ export function phoneTools({
       definition: {
         name: "phone_open_app",
         description:
-          "Open one app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it. Do not use this as the first step of a multi-step task; put the launch inside phone_plan so the whole task is approved and completed once.",
+          "Open one app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it. Do not use this as the first step of a multi-step task; use phone_task_start so the whole goal is approved once and the agent can choose the next action from the screen.",
         parameters: {
           type: "object",
           properties: { name: { type: "string" } },
@@ -210,7 +210,7 @@ export function phoneTools({
       definition: {
         name: "phone_plan",
         description:
-          "Run the whole phone task as one guarded plan under one approval. Use this instead of separate taps whenever the request needs more than one action. Up to 15 steps. Actions: launch an app, open a deep link, tap visible text, tap coordinates, type into a visible field, scroll, press back/home/recents, or wait only. Every step that taps, types or scrolls must include wait_for text/desc/id from the expected screen; if that anchor never appears the flow stops instead of acting blind. Launch may omit wait_for. Never put a password, PIN or one-time code in a plan. The plan itself is the owner's checklist: the user approves it once and the result reports which steps ran.",
+          "Run an exact sequence the owner already specified, under one approval. For a goal that requires the agent to look at the screen and decide, use phone_task_start instead. Up to 15 steps. Actions: launch an app, open a deep link, tap visible text, tap coordinates, type into a visible field, scroll, press back/home/recents, or wait only. Every step that taps, types or scrolls must include wait_for text/desc/id from the expected screen; if that anchor never appears the flow stops instead of acting blind. Launch may omit wait_for. Never put a password, PIN or one-time code in a plan.",
         parameters: {
           type: "object",
           properties: {
@@ -224,7 +224,7 @@ export function phoneTools({
                   wait_for: {
                     type: "object",
                     description:
-                      "An anchor on the expected screen. Use text for visible text, desc for a content description such as WhatsApp's Search or Message buttons, or id for an Android resource id.",
+                      "An anchor on the expected screen. Use text for visible text, desc for a content description such as a Search or Message button, or id for an Android resource id.",
                     properties: {
                       text: { type: "string", description: "Visible text to wait for" },
                       desc: { type: "string", description: "Content description to wait for" },

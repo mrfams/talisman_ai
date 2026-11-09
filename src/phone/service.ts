@@ -6,6 +6,8 @@ import {
   claimCommand,
   claimPairingCode,
   completeCommand,
+  completePhoneApproval,
+  countPhoneApprovalCommands,
   createDevice,
   createPhoneApproval,
   decidePhoneApproval,
@@ -60,7 +62,7 @@ export interface PairingClaim {
 export interface PublicPhoneApproval {
   id: string;
   deviceId: string;
-  op: "act" | "flow";
+  op: "act" | "flow" | "task";
   args: Record<string, unknown>;
   summary: string;
   status: PhoneApproval["status"];
@@ -76,6 +78,12 @@ export interface PhoneActionDecision {
     status: string;
     result: unknown;
     error: string | null;
+  } | null;
+  /** Present when the owner approved an autonomous task envelope. */
+  task: {
+    id: string;
+    goal: string;
+    maxSteps: number;
   } | null;
 }
 
@@ -97,6 +105,9 @@ export interface PublicPhoneDevice {
 
 const ONLINE_WINDOW_MS = 90_000;
 const APPROVAL_TTL_MS = 2 * 60_000;
+const TASK_TTL_MS = 10 * 60_000;
+const DEFAULT_TASK_STEPS = 20;
+const MAX_TASK_STEPS = 30;
 const PHONE_ACTIONS = [
   "launch",
   "deep_link",
@@ -123,7 +134,14 @@ export function publicApproval(approval: PhoneApproval): PublicPhoneApproval {
   };
 }
 
-function actionSummary(deviceName: string, op: "act" | "flow", args: Record<string, unknown>): string {
+function actionSummary(
+  deviceName: string,
+  op: "act" | "flow" | "task",
+  args: Record<string, unknown>,
+): string {
+  if (op === "task") {
+    return `Work on ${String(args.goal ?? "a phone task")} on ${deviceName}`;
+  }
   if (op === "flow") {
     const steps = Array.isArray(args.steps) ? args.steps.length : 0;
     return `Run a ${steps}-step action flow on ${deviceName}`;
@@ -427,6 +445,85 @@ export class PhoneService {
     return publicApproval(approval);
   }
 
+  /**
+   * One approval for a goal, not for a guessed sequence. The phone is read
+   * between actions, so the executor can adapt to what is actually on screen.
+   */
+  async requestTask(
+    orgId: string,
+    userId: string,
+    deviceId: string,
+    input: { goal: string; maxSteps?: number },
+  ): Promise<PublicPhoneApproval> {
+    const goal = input.goal.trim().slice(0, 1_000);
+    if (goal.length < 3) throw errors.invalid("A phone task needs a goal");
+    const requestedSteps = Number(input.maxSteps ?? DEFAULT_TASK_STEPS);
+    const maxSteps = Number.isFinite(requestedSteps)
+      ? Math.max(1, Math.min(MAX_TASK_STEPS, Math.trunc(requestedSteps)))
+      : DEFAULT_TASK_STEPS;
+    const device = await this.get(orgId, userId, deviceId);
+    if (device.status !== "active") {
+      throw errors.conflict(
+        device.status === "revoked"
+          ? "This phone has been revoked"
+          : "This phone is paused. Resume it first.",
+      );
+    }
+    const active = await this.activeTask(orgId, userId, deviceId);
+    if (active) throw errors.conflict("This phone already has an approved task running");
+    const pending = await this.listApprovals(orgId, userId, "pending");
+    if (pending.some((approval) => approval.deviceId === deviceId && approval.op === "task")) {
+      throw errors.conflict("This phone already has a task waiting for approval");
+    }
+
+    const args = { goal, max_steps: maxSteps };
+    const approval = await this.database.withTenant(orgId, userId, (conn) =>
+      createPhoneApproval(conn, {
+        id: newId(),
+        orgId,
+        userId,
+        deviceId: device.id,
+        op: "task",
+        args,
+        argsHash: hashArgs(args),
+        summary: actionSummary(device.name, "task", args).slice(0, 500),
+        expiresAt: new Date(Date.now() + TASK_TTL_MS),
+      }),
+    );
+    return publicApproval(approval);
+  }
+
+  async activeTask(
+    orgId: string,
+    userId: string,
+    deviceId: string,
+  ): Promise<PublicPhoneApproval | null> {
+    const approvals = await this.database.withTenant(orgId, userId, (conn) =>
+      listPhoneApprovals(conn, orgId, userId, "approved", 50),
+    );
+    const now = Date.now();
+    return (
+      approvals.find(
+        (approval) =>
+          approval.deviceId === deviceId &&
+          approval.op === "task" &&
+          new Date(approval.expiresAt).getTime() > now,
+      ) ?? null
+    );
+  }
+
+  async completeTask(
+    orgId: string,
+    userId: string,
+    taskId: string,
+  ): Promise<PublicPhoneApproval> {
+    const completed = await this.database.withTenant(orgId, userId, (conn) =>
+      completePhoneApproval(conn, taskId, orgId, userId),
+    );
+    if (!completed) throw errors.conflict("This phone task is no longer active");
+    return publicApproval(completed);
+  }
+
   async listApprovals(
     orgId: string,
     userId: string,
@@ -462,7 +559,21 @@ export class PhoneService {
     );
     if (!decided) throw errors.conflict("This phone action was already decided");
     if (decision === "denied") {
-      return { approval: publicApproval(decided), command: null };
+      return { approval: publicApproval(decided), command: null, task: null };
+    }
+
+    if (approval.op === "task") {
+      return {
+        approval: publicApproval(decided),
+        command: null,
+        task: {
+          id: approval.id,
+          goal: String(approval.args.goal ?? ""),
+          maxSteps: Number.isFinite(Number(approval.args.max_steps))
+            ? Number(approval.args.max_steps)
+            : DEFAULT_TASK_STEPS,
+        },
+      };
     }
 
     const device = await this.get(orgId, userId, approval.deviceId);
@@ -475,7 +586,50 @@ export class PhoneService {
     return {
       approval: publicApproval(decided),
       command: { id: command.id, ...outcome },
+      task: null,
     };
+  }
+
+  /**
+   * Executes one exact action inside an already approved task envelope. The
+   * command still carries the phone-approval id and the hash of these exact
+   * arguments, so the device refuses anything the server did not queue.
+   */
+  async executeApproved(
+    device: PhoneDevice,
+    taskId: string,
+    args: Record<string, unknown>,
+    timeoutMs = 20_000,
+  ): Promise<{ status: string; result: unknown; error: string | null }> {
+    const scope = await this.database.withTenant(device.orgId, device.userId, async (conn) => {
+      const task = await getPhoneApproval(conn, taskId, device.orgId, device.userId);
+      if (!task) return null;
+      return { task, used: await countPhoneApprovalCommands(conn, taskId) };
+    });
+    if (
+      !scope ||
+      scope.task.op !== "task" ||
+      scope.task.deviceId !== device.id ||
+      scope.task.status !== "approved" ||
+      new Date(scope.task.expiresAt).getTime() <= Date.now()
+    ) {
+      throw errors.conflict("This phone task is no longer active");
+    }
+    const requestedSteps = Number(scope.task.args.max_steps ?? DEFAULT_TASK_STEPS);
+    const maxSteps = Number.isFinite(requestedSteps)
+      ? Math.max(1, Math.min(MAX_TASK_STEPS, Math.trunc(requestedSteps)))
+      : DEFAULT_TASK_STEPS;
+    if (scope.used >= maxSteps) {
+      throw errors.conflict(
+        `This phone task has used all ${maxSteps} approved actions. Start a new task to continue.`,
+      );
+    }
+    const command = await this.enqueue(device, {
+      op: "act",
+      args,
+      phoneApprovalId: taskId,
+    });
+    return this.awaitCommand(device, command.id, timeoutMs);
   }
 
   async enqueue(

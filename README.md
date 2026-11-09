@@ -62,12 +62,12 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
 - Phone-hosted Android companion (forked from Claw Use, MIT): pair a sideloaded
   companion, queue `observe`/`act`/`flow`/`apps`/`status` commands, inspect the
   latest JPEG frame, pause or revoke a device, and keep the old Phone Harness
-  cloud/bridge transport as a compatibility adapter. A `phone_plan` chat tool
-  submits an entire guarded task (up to fifteen steps, including launching an app,
-  tapping, typing, scrolling and sending) under one approval; each step waits for
-  an expected label and the flow stops instead of acting on a changed screen. The
-  chat shows the plan as a checklist and only reports complete when every step
-  succeeded. Both browser and chat actions are bound to the exact argument hash. See
+  cloud/bridge transport as a compatibility adapter. A phone request becomes an
+  autonomous task: the owner approves the goal once, then the agent reads the live
+  screen, chooses one action, reads again, and maintains its own checklist until
+  the goal is visibly complete. Nothing is hardcoded to an app; labels, refs and
+  the next step come from what the phone actually shows. Every command remains
+  bound to its exact argument hash. See
   [`docs/PHONE-COMPANION-PROTOCOL.md`](docs/PHONE-COMPANION-PROTOCOL.md). Download
   the latest debug APK from [Releases](https://github.com/mrfams/talisman_ai/releases).
 - Unit/integration tests, a real-Chrome end-to-end test, a live deployment check,
@@ -76,9 +76,9 @@ in [`docs/DECISIONS.md`](docs/DECISIONS.md); the security boundary is in
 Still not wired: OpenBot's Docker computers and supervisor, Gmail, MCP/Composio
 connectors, goals and monitors, and AG-UI. The phone companion is not
 production-ready yet: a debug APK builds in CI, but physical execution has not
-been exercised on a real phone. The on-device flow executor supports taps, waits,
-navigation, app launch, typing and scrolling in one approved plan. See the protocol
-document for the exact boundary.
+been exercised on a real phone. The on-device executor supports taps, waits,
+navigation, app launch, typing and scrolling, and the server drives it through
+the live observe/act loop. See the protocol document for the exact boundary.
 
 ## Two ways to run it
 

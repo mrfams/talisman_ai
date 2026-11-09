@@ -396,3 +396,95 @@ test("expired commands are not delivered and argument hashes are stable", async 
     await database.close();
   }
 });
+
+test("a task approval is a goal envelope with a server-enforced action budget", async () => {
+  const database = await makeDatabase();
+  const dataDir = await makeDataDir();
+  try {
+    const { app, config } = appFor(database, dataDir);
+    const alice = await makeUser(database);
+    await pair(app, alice.token);
+    const service = new PhoneService(database, config.publicUrl);
+    const device = await service.activeDevice(alice.user.orgId, alice.user.id);
+    assert.ok(device);
+
+    const requested = await service.requestTask(alice.user.orgId, alice.user.id, device!.id, {
+      goal: "Open Settings and leave it visible",
+      maxSteps: 1,
+    });
+    assert.equal(requested.op, "task");
+    assert.equal(requested.status, "pending");
+    assert.deepEqual(requested.args, { goal: "Open Settings and leave it visible", max_steps: 1 });
+
+    await assert.rejects(
+      () =>
+        service.requestTask(alice.user.orgId, alice.user.id, device!.id, {
+          goal: "Open a second task",
+        }),
+      /waiting for approval/,
+    );
+
+    const decided = await service.decideAction(
+      alice.user.orgId,
+      alice.user.id,
+      requested.id,
+      "approved",
+    );
+    assert.equal(decided.approval.status, "approved");
+    assert.equal(decided.command, null, "a task approval must not queue a preset command");
+    assert.deepEqual(decided.task, {
+      id: requested.id,
+      goal: "Open Settings and leave it visible",
+      maxSteps: 1,
+    });
+    assert.equal((await service.activeTask(alice.user.orgId, alice.user.id, device!.id))?.id, requested.id);
+
+    const queued = await database.withTenant(alice.user.orgId, alice.user.id, (conn) =>
+      conn.query<{ n: number }>("SELECT count(*)::int AS n FROM phone_commands"),
+    );
+    assert.equal(queued.rows[0]?.n, 0);
+
+    const args = { action: "global", name: "home" };
+    const firstAction = service.executeApproved(device!, requested.id, args);
+    await sleep(200);
+    const command = await service.poll(device!, 2_000);
+    assert.ok(command, "an action inside the task must still queue normally");
+    assert.equal(command!.op, "act");
+    assert.equal(command!.approvalId, requested.id);
+    assert.equal(command!.argsHash, hashArgs(args));
+    assert.deepEqual(command!.args, args);
+
+    const completed = await service.complete(device!, {
+      commandId: command!.id,
+      status: "done",
+      result: { ok: true },
+      error: null,
+      durationMs: null,
+    });
+    assert.equal(completed.status, "done");
+    assert.equal((await firstAction).status, "done");
+
+    await assert.rejects(
+      () => service.executeApproved(device!, requested.id, { action: "global", name: "back" }),
+      /used all 1 approved actions/,
+      "the approved action budget must be enforced by the server, not only the prompt",
+    );
+    const stillOne = await database.withTenant(alice.user.orgId, alice.user.id, (conn) =>
+      conn.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM phone_commands WHERE phone_approval_id = $1",
+        [requested.id],
+      ),
+    );
+    assert.equal(stillOne.rows[0]?.n, 1, "the over-budget action must not be queued");
+
+    const finished = await service.completeTask(alice.user.orgId, alice.user.id, requested.id);
+    assert.equal(finished.status, "completed");
+    assert.equal(await service.activeTask(alice.user.orgId, alice.user.id, device!.id), null);
+    await assert.rejects(
+      () => service.executeApproved(device!, requested.id, { action: "global", name: "back" }),
+      /no longer active/,
+    );
+  } finally {
+    await database.close();
+  }
+});

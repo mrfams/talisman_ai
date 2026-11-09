@@ -62,6 +62,7 @@ import { calendarTools } from "../connectors/calendar-tools.js";
 import { createPhone, isPhoneOp, PHONE_OPS } from "../connectors/phone.js";
 import { companionFor } from "../connectors/companion-phone.js";
 import { phoneTools } from "../connectors/phone-tools.js";
+import { phoneTaskTools } from "../connectors/phone-task.js";
 import { webTools } from "../connectors/web-tools.js";
 import { createBrowser } from "../browser/factory.js";
 import type { BrowserDriver } from "../browser/driver.js";
@@ -228,7 +229,7 @@ function audit(
 async function notifyPhoneApproval(
   deps: AppDeps,
   session: SessionInfo,
-  approval: { id: string; summary: string; deviceId: string },
+  approval: { id: string; summary: string; deviceId: string; op?: string },
 ): Promise<void> {
   await deps.database
     .withTenant(session.user.orgId, session.user.id, (conn) =>
@@ -236,7 +237,7 @@ async function notifyPhoneApproval(
         orgId: session.user.orgId,
         userId: session.user.id,
         kind: "phone.approval",
-        title: "Phone plan needs approval",
+        title: approval.op === "task" ? "Phone task needs approval" : "Phone plan needs approval",
         body: approval.summary,
         data: { approvalId: approval.id, deviceId: approval.deviceId },
       }),
@@ -598,13 +599,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/phone/approvals", async (c) => {
     const { user } = requireUser(c);
     const status = c.req.query("status") ?? "pending";
-    if (!["pending", "approved", "denied", "expired", "all"].includes(status)) {
+    if (!["pending", "approved", "denied", "expired", "completed", "all"].includes(status)) {
       throw errors.invalid("Unknown approval status");
     }
     const approvals = await phoneService.listApprovals(
       user.orgId,
       user.id,
-      status as "pending" | "approved" | "denied" | "expired" | "all",
+      status as "pending" | "approved" | "denied" | "expired" | "completed" | "all",
     );
     return c.json({ approvals });
   });
@@ -893,18 +894,23 @@ export function createApp(deps: AppDeps): Hono<Env> {
       .activeDevice(user.orgId, user.id)
       .catch(() => null);
     const chatPhone = companionFor(phoneService, companionDevice) ?? phone;
+    const activePhoneTask = companionDevice
+      ? await phoneService.activeTask(user.orgId, user.id, companionDevice.id).catch(() => null)
+      : null;
     const profileContext = profile
       ? `\n\nUser profile: timezone ${profile.timezone}; locale ${profile.locale}; display name ${profile.displayName ?? "unknown"}. Preferences: ${JSON.stringify(profile.preferences)}. Use the timezone when interpreting times and schedules.`
       : "";
     const phoneContext = companionDevice
-      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly; do not use create_task for phone control. For anything that needs more than one action (for example “open WhatsApp, find Sam, and send a greeting”), call phone_look only if you need the current labels, then call phone_plan ONCE with the whole sequence. Do not open the app as a separate action first, and never stop after opening it. A plan may contain up to 15 steps and supports launch, deep_link, tap_text, tap, type, scroll, global back/home/recents, and wait-only. Use wait_for text from the expected next screen before every tap, type, or scroll; launch may omit it. The approval card is the owner's todo list, approved once. After approval the plan result reports exactly which steps ran. Only say the task is complete when the plan result says every non-optional step succeeded; otherwise name the step that stopped and why. A typical WhatsApp send is: launch com.whatsapp, wait for Search and tap it, wait for the search field and type the contact, wait for the contact result and tap it, wait for the message field and type the greeting, wait for Send and tap it.`
+      ? activePhoneTask
+        ? ` An approved autonomous phone task is active on "${companionDevice.name}". Goal: ${String(activePhoneTask.args.goal ?? "")}. Work only toward that goal, with at most ${Number(activePhoneTask.args.max_steps ?? 20)} actions. Use phone_task_look to read the live screen, then phone_task_act for exactly one action, then look again. Read before every decision; never assume what is on screen. Keep the owner's todo list current with phone_task_update. Call phone_task_done only when the final screen visibly confirms the goal. Do not use phone_plan, phone_open_app, phone_tap_text or phone_type while this task is active. Never type a password, PIN or one-time code, and do not pay, delete or send anything outside the approved goal.`
+        : ` A paired Android phone named "${companionDevice.name}" is connected. For a phone request that needs more than one action, call phone_task_start once with the outcome the owner asked for. Do not precompute an app-specific sequence and do not use phone_plan. The owner approves that goal once; after approval you will inspect the live screen and choose each action yourself. Use the single-action phone tools only when the request genuinely needs one action. Do not use create_task for phone control.`
       : "";
     const continuation =
       internal && body.context
-        ? `\n\nInternal continuation after a phone approval (not a new user request): ${body.context}\nContinue the original request from the current phone screen. Do not repeat an action that already succeeded. If the requested result is complete, say so plainly.`
+        ? `\n\nInternal continuation after a phone approval (not a new user request): ${body.context}\nContinue the original request from the current phone screen. If an approved phone task is active, look at the screen now, take the next action yourself, and update the checklist. Do not repeat an action that already succeeded. Only say the task is complete when the final screen visibly confirms it.`
         : "";
     const messages = buildContext({
-      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look things up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive. When a phone path is already known, put the entire task into one phone_plan (up to 15 steps) so the owner approves it once; every tap, type and scroll needs a wait_for anchor so a changed screen stops the whole flow.${profileContext}${phoneContext}${continuation}`,
+      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look things up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone work is a live observe → decide → act loop, not a precomputed app recipe. For any phone request that needs more than one action, use phone_task_start with the goal; the owner approves that goal once. After approval, read the live screen with phone_task_look, take one action with phone_task_act, look again, and maintain your own checklist with phone_task_update. Never hardcode an app's screens or labels; derive every action from what the phone actually shows. Only report the task complete after phone_task_done confirms it and the final screen visibly shows the result.${profileContext}${phoneContext}${continuation}`,
       memories: relevantMemories,
       history: chatHistory,
       budgetTokens: 24_000,
@@ -1012,10 +1018,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
         orgId: user.orgId,
         userId: user.id,
       }),
-      ...phoneTools({
-        phone: chatPhone,
-        requestApproval: companionDevice
-          ? async (input) => {
+      ...(companionDevice && !activePhoneTask
+        ? phoneTools({
+            phone: chatPhone,
+            requestApproval: async (input) => {
               const requested = await phoneService.requestAction(
                 user.orgId,
                 user.id,
@@ -1028,17 +1034,41 @@ export function createApp(deps: AppDeps): Hono<Env> {
                 summary: requested.summary,
                 expiresAt: requested.expiresAt,
               };
-            }
-          : undefined,
-      }),
+            },
+          }).filter((tool) => tool.definition.name !== "phone_plan")
+        : []),
+      ...(companionDevice
+        ? phoneTaskTools({
+            service: phoneService,
+            device: companionDevice,
+            orgId: user.orgId,
+            userId: user.id,
+            onApprovalRequested: (approval) =>
+              notifyPhoneApproval(deps, { user, expiresAt: "" }, approval),
+            onAction: (input) =>
+              audit(deps, { user, expiresAt: "" }, "phone.task.action", "phone_task", input.taskId, {
+                action: input.action,
+                args: input.args,
+              }),
+          }).filter((tool) =>
+            activePhoneTask
+              ? tool.definition.name !== "phone_task_start"
+              : tool.definition.name === "phone_task_start",
+          )
+        : []),
     ];
+
+    // The approval for a task is an envelope, not a command. When it is allowed,
+    // the client sends an internal continuation; this request then exposes only
+    // the observe/act loop for that task.
 
     const agent = new Agent(deps.models, tools);
     return streamSSE(c, async (stream) => {
       let assistantText = "";
       try {
         const result = await agent.run({
-          messages,            maxSteps: 8,
+          messages,
+          maxSteps: 24,
           signal: c.req.raw.signal,
           onEvent: async (event) => {
             if (event.type === "text_delta") {
@@ -1057,6 +1087,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
                     summary?: string;
                     expires_at?: string;
                     plan?: unknown;
+                    task?: boolean;
                     taskId?: string;
                     progress?: number;
                   }
@@ -1073,6 +1104,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
                     expiresAt: result.expires_at ?? null,
                     deviceName: companionDevice?.name ?? null,
                     plan: Array.isArray(result.plan) ? result.plan : null,
+                    task: result.task === true,
                   }),
                 });
               }

@@ -137,7 +137,7 @@ A command is claimable only while it is `queued` and unexpired. An expired queue
 {
   "command_id": "cmd_...",
   "status": "done",
-  "result": { "ok": true, "screen": { "package": "com.whatsapp", "nodes": [] } },
+  "result": { "ok": true, "screen": { "package": "com.example.app", "nodes": [] } },
   "duration_ms": 840
 }
 ```
@@ -232,7 +232,7 @@ Android implementation returns all accessibility nodes.
 {
   "ok": true,
   "screen": {
-    "package": "com.whatsapp",
+    "package": "com.example.app",
     "nodes": [
       {
         "ref": 3,
@@ -249,7 +249,7 @@ Android implementation returns all accessibility nodes.
   },
   "width": 1080,
   "height": 2400,
-  "data": { "package": "com.whatsapp" },
+  "data": { "package": "com.example.app" },
   "screenshot": { "mime": "image/jpeg", "base64": "..." }
 }
 ```
@@ -269,7 +269,7 @@ base64 in the result. Screenshots are capped at 300 KB and require Android API 3
 { "action": "swipe", "x1": 540, "y1": 1800, "x2": 540, "y2": 600 }
 { "action": "scroll", "direction": "down" }
 { "action": "global", "name": "back" }
-{ "action": "launch", "package": "com.whatsapp" }
+{ "action": "launch", "package": "com.example.app" }
 { "action": "deep_link", "uri": "https://example.com/path" }
 ```
 
@@ -290,7 +290,7 @@ Args:
 ```json
 {
   "steps": [
-    { "then": { "action": "launch", "package": "com.whatsapp" } },
+    { "then": { "action": "launch", "package": "com.example.app" } },
     {
       "wait_for": { "desc": "Search", "timeout_ms": 8000 },
       "then": { "action": "tap_text", "text": "Search" }
@@ -328,6 +328,25 @@ optional `timeout_ms`. The Android translation supports:
 Unsupported steps fail with `unsupported_step`. The first non-optional failure stops the flow,
 and the result lists each step's outcome so the caller can show a checklist and report exactly
 where it stopped.
+
+### `task` approvals
+
+A multi-action chat request is not translated into a guessed flow. The owner approves a *goal*
+instead: `phone_approvals.op = 'task'` with `{ "goal": "...", "max_steps": 20 }`. After approval, the
+server runs a live loop:
+
+1. `observe` the current screen;
+2. choose one action from the visible elements;
+3. queue that exact `act` command under the task approval;
+4. observe again and update the owner's checklist;
+5. finish with `phone_task_done`, which marks the task `completed`.
+
+Each `act` command still carries the task approval id and the hash of its exact arguments, so the
+device verifies the bytes it is about to execute. The task approval is the scope, not a script;
+the model supplies every step. The server rejects an action after `max_steps` commands, and after
+the task is completed or expires. Pausing or revoking the device expires an approved task, and an
+expired task cannot authorise another command. A goal that includes sending is explicit; the
+model is instructed not to pay, delete, or send anything outside it.
 
 ### `apps`
 

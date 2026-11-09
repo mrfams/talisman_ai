@@ -307,12 +307,12 @@ CREATE TABLE IF NOT EXISTS phone_approvals (
   org_id text NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   device_id text NOT NULL REFERENCES phone_devices(id) ON DELETE CASCADE,
-  op text NOT NULL CHECK (op IN ('act','flow')),
+  op text NOT NULL CHECK (op IN ('act','flow','task')),
   args jsonb NOT NULL DEFAULT '{}'::jsonb,
   args_hash text NOT NULL,
   summary text NOT NULL,
   status text NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','approved','denied','expired')),
+    CHECK (status IN ('pending','approved','denied','expired','completed')),
   decided_at timestamptz,
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -321,6 +321,14 @@ CREATE INDEX IF NOT EXISTS phone_approvals_pending_idx
   ON phone_approvals (org_id, user_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS phone_approvals_device_idx
   ON phone_approvals (device_id, created_at DESC);
+-- An approved task is a scoped envelope for a live observe/decide/act loop,
+-- not a pre-recorded flow. Existing deployments need the wider values.
+ALTER TABLE phone_approvals DROP CONSTRAINT IF EXISTS phone_approvals_op_check;
+ALTER TABLE phone_approvals ADD CONSTRAINT phone_approvals_op_check
+  CHECK (op IN ('act','flow','task'));
+ALTER TABLE phone_approvals DROP CONSTRAINT IF EXISTS phone_approvals_status_check;
+ALTER TABLE phone_approvals ADD CONSTRAINT phone_approvals_status_check
+  CHECK (status IN ('pending','approved','denied','expired','completed'));
 
 CREATE TABLE IF NOT EXISTS phone_commands (
   id text PRIMARY KEY,

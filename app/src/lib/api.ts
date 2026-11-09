@@ -174,14 +174,16 @@ export interface PhonePairing {
 export interface PhoneApproval {
   id: string;
   deviceId: string;
-  op: "act" | "flow";
+  op: "act" | "flow" | "task";
   args: Record<string, unknown>;
   summary: string;
-  status: "pending" | "approved" | "denied" | "expired";
+  status: "pending" | "approved" | "denied" | "expired" | "completed";
   expiresAt: string;
   createdAt: string;
   decidedAt: string | null;
   plan?: string[] | null;
+  /** True for one approved goal that runs as a live observe/act loop. */
+  task?: boolean;
 }
 
 export interface PhoneActionDecision {
@@ -192,6 +194,7 @@ export interface PhoneActionDecision {
     result: unknown;
     error: string | null;
   } | null;
+  task: { id: string; goal: string; maxSteps: number } | null;
 }
 
 export interface DevicesResponse {
@@ -484,6 +487,7 @@ export interface StreamHandlers {
     expiresAt: string | null;
     deviceName: string | null;
     plan?: string[] | null;
+    task?: boolean;
   }) => void;
   onDone: () => void;
   onError: (message: string) => void;

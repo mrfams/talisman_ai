@@ -50,6 +50,30 @@ function flowExecution(raw: unknown): FlowExecution | null {
   };
 }
 
+function taskChecklistRun(
+  summary: string,
+  items: unknown,
+  completed: boolean,
+): PhonePlanRun | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  return {
+    id: "phone-task-live",
+    summary,
+    steps: items.slice(0, 20).map((item) => {
+      const row = (item ?? {}) as Record<string, unknown>;
+      const state = String(row.status ?? "pending");
+      return {
+        title: String(row.title ?? "Step"),
+        status:
+          state === "done" || state === "failed" || state === "skipped"
+            ? state
+            : "pending",
+      };
+    }),
+    completed: completed ? true : null,
+  };
+}
+
 function planRun(
   id: string,
   summary: string,
@@ -214,6 +238,22 @@ export function Chat() {
                 task,
               ]);
             }
+            if (event.name === "phone_task_update" || event.name === "phone_task_done") {
+              const args = event.args as
+                | { items?: unknown; summary?: string }
+                | undefined;
+              const run = taskChecklistRun(
+                args?.summary ?? "Phone task",
+                args?.items,
+                event.name === "phone_task_done",
+              );
+              if (run) {
+                setPhonePlanRuns((current) => [
+                  ...current.filter((item) => item.id !== run.id),
+                  run,
+                ]);
+              }
+            }
           },
           onApproval: (approval) => {
             setPhoneApprovals((current) => [
@@ -221,7 +261,7 @@ export function Chat() {
               {
                 id: approval.id,
                 deviceId: "",
-                op: "act",
+                op: approval.task ? "task" : "act",
                 args: {},
                 summary: approval.summary,
                 status: "pending",
@@ -229,6 +269,7 @@ export function Chat() {
                 createdAt: new Date().toISOString(),
                 decidedAt: null,
                 plan: approval.plan ?? null,
+                task: approval.task === true,
               },
             ]);
           },
@@ -288,6 +329,27 @@ export function Chat() {
       if (decision === "denied") {
         setPhonePlanRuns((current) => current.filter((run) => run.id !== id));
         setApprovalNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
+        return;
+      }
+
+      if (result.task) {
+        setPhonePlanRuns((current) => [
+          ...current.filter((run) => run.id !== "phone-task-live"),
+          {
+            id: "phone-task-live",
+            summary: result.task!.goal || summary,
+            steps: [{ title: "Reading the phone screen", status: "pending" }],
+            completed: null,
+          },
+        ]);
+        setApprovalNote({
+          tone: "neutral",
+          text: "Task approved. Talisman is reading the screen and choosing the next action…",
+        });
+        await send("Continue the approved phone task.", {
+          internal: true,
+          context: `Approved phone task ${result.task.id}. Goal: ${result.task.goal}. Read the live screen, take the next action yourself, update the checklist, and continue until the goal is visibly complete.`,
+        });
         return;
       }
 
@@ -609,7 +671,9 @@ export function Chat() {
                           </ol>
                         ) : null}
                         <div className="tiny faint" style={{ marginTop: 3 }}>
-                          Phone approval · one approval covers the whole plan · expires{" "}
+                          {approval.task
+                            ? "Autonomous phone task · Talisman chooses each action · expires "
+                            : "Phone approval · one approval covers the whole plan · expires "}
                           {new Date(approval.expiresAt).toLocaleTimeString([], {
                             hour: "2-digit",
                             minute: "2-digit",
@@ -624,7 +688,7 @@ export function Chat() {
                           busy={approvalBusy === approval.id}
                           onClick={() => void decidePhoneApproval(approval.id, "approved")}
                         >
-                          Allow once
+                          {approval.task ? "Allow task" : "Allow once"}
                         </Button>
                         <Button
                           size="sm"

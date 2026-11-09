@@ -48,11 +48,11 @@ export interface PhoneApproval {
   orgId: string;
   userId: string;
   deviceId: string;
-  op: "act" | "flow";
+  op: "act" | "flow" | "task";
   args: Record<string, unknown>;
   argsHash: string;
   summary: string;
-  status: "pending" | "approved" | "denied" | "expired";
+  status: "pending" | "approved" | "denied" | "expired" | "completed";
   decidedAt: string | null;
   expiresAt: string;
   createdAt: string;
@@ -331,7 +331,7 @@ export async function createPhoneApproval(
     orgId: string;
     userId: string;
     deviceId: string;
-    op: "act" | "flow";
+    op: "act" | "flow" | "task";
     args: Record<string, unknown>;
     argsHash: string;
     summary: string;
@@ -369,6 +369,17 @@ export async function getPhoneApproval(
     [id, orgId, userId],
   );
   return rows[0] ? mapApproval(rows[0]) : null;
+}
+
+export async function countPhoneApprovalCommands(
+  conn: Conn,
+  approvalId: string,
+): Promise<number> {
+  const { rows } = await conn.query<{ n: number }>(
+    "SELECT count(*)::int AS n FROM phone_commands WHERE phone_approval_id = $1",
+    [approvalId],
+  );
+  return Number(rows[0]?.n ?? 0);
 }
 
 export async function listPhoneApprovals(
@@ -418,6 +429,24 @@ export async function decidePhoneApproval(
   return rows[0] ? mapApproval(rows[0]) : null;
 }
 
+/** A finished task envelope must stop authorising further actions. */
+export async function completePhoneApproval(
+  conn: Conn,
+  id: string,
+  orgId: string,
+  userId: string,
+): Promise<PhoneApproval | null> {
+  const { rows } = await conn.query<Row>(
+    `UPDATE phone_approvals
+        SET status = 'completed', decided_at = COALESCE(decided_at, now())
+      WHERE id = $1 AND org_id = $2 AND user_id = $3
+        AND op = 'task' AND status = 'approved'
+      RETURNING *`,
+    [id, orgId, userId],
+  );
+  return rows[0] ? mapApproval(rows[0]) : null;
+}
+
 /** Pausing or revoking a phone must also kill its pending action requests. */
 export async function cancelPhoneApprovals(
   conn: Conn,
@@ -425,7 +454,8 @@ export async function cancelPhoneApprovals(
 ): Promise<number> {
   const { rows } = await conn.query<Row>(
     `UPDATE phone_approvals SET status = 'expired'
-      WHERE device_id = $1 AND status = 'pending'
+      WHERE device_id = $1
+        AND (status = 'pending' OR (status = 'approved' AND op = 'task'))
       RETURNING id`,
     [deviceId],
   );
