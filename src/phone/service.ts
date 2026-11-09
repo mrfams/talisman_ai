@@ -444,7 +444,7 @@ export class PhoneService {
     userId: string,
     approvalId: string,
     decision: "approved" | "denied",
-    waitMs = 20_000,
+    waitMs = 45_000,
   ): Promise<PhoneActionDecision> {
     const approval = await this.database.withTenant(orgId, userId, (conn) =>
       getPhoneApproval(conn, approvalId, orgId, userId),
@@ -631,7 +631,7 @@ export class PhoneService {
     commandId: string,
     timeoutMs: number,
   ): Promise<{ status: string; result: unknown; error: string | null }> {
-    const deadline = Date.now() + Math.max(1_000, Math.min(timeoutMs, 45_000));
+    const deadline = Date.now() + Math.max(1_000, Math.min(timeoutMs, 55_000));
     for (;;) {
       const current = await this.database.withTenant(device.orgId, device.userId, (conn) =>
         getCommand(conn, commandId, device.id),

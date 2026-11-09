@@ -1,6 +1,12 @@
 package com.clawuse.android.handlers;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
+import android.content.Intent;
 import android.graphics.Rect;
+import android.net.Uri;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -39,7 +45,8 @@ import java.util.Map;
  *   <li>{@code waitId} — resource ID to find (alternative to text)</li>
  *   <li>{@code waitDesc} — content description to find</li>
  *   <li>{@code waitGone} — wait for this text to DISAPPEAR</li>
- *   <li>{@code then} — action: "tap", "click", "longpress", "back", "home", "none"</li>
+ *   <li>{@code then} — action: "tap", "click", "longpress", "back", "home", "none",
+ *       "launch", "deep_link", "type", "scroll", "recents"</li>
  *   <li>{@code timeout} — per-step timeout in ms (default 10000)</li>
  *   <li>{@code optional} — if true, timeout doesn't fail the flow (default false)</li>
  *   <li>{@code pauseMs} — pause after action before next step (default 500)</li>
@@ -148,6 +155,12 @@ public class FlowHandler implements RouteHandler {
         int timeout = step.optInt("timeout", DEFAULT_STEP_TIMEOUT);
         boolean optional = step.optBoolean("optional", false);
 
+        // Launch and deep links do not need a visible anchor: the screen they
+        // change to is verified by the next step's wait.
+        if ("launch".equalsIgnoreCase(action) || "deep_link".equalsIgnoreCase(action)) {
+            return openTarget(b, step, action, result);
+        }
+
         boolean isWaitGone = !waitGone.isEmpty();
         String searchTerm = isWaitGone ? waitGone : (!waitText.isEmpty() ? waitText : (!waitDesc.isEmpty() ? waitDesc : waitId));
 
@@ -234,13 +247,41 @@ public class FlowHandler implements RouteHandler {
 
         try {
             switch (action.toLowerCase()) {
-                case "tap":
-                    b.tap(bounds.centerX(), bounds.centerY());
+                case "tap": {
+                    int tapX = bounds.centerX();
+                    int tapY = bounds.centerY();
+                    String targetText = step.optString("target", "");
+                    if (!targetText.isEmpty()) {
+                        AccessibilityNodeInfo root = SafeA11y.getRootSafe(b, A11Y_TIMEOUT);
+                        AccessibilityNodeInfo target = root == null ? null
+                                : SafeA11y.findByTextSafe(b, root, targetText, A11Y_TIMEOUT);
+                        if (target == null && root != null) {
+                            // WhatsApp's Search/Send controls expose labels as
+                            // content descriptions rather than text.
+                            target = SafeA11y.findByDescSafe(b, root, targetText, A11Y_TIMEOUT);
+                        }
+                        if (target == null) {
+                            if (root != null) root.recycle();
+                            result.put("error", "tap target not found: " + targetText);
+                            break;
+                        }
+                        Rect targetBounds = new Rect();
+                        target.getBoundsInScreen(targetBounds);
+                        tapX = targetBounds.centerX();
+                        tapY = targetBounds.centerY();
+                        target.recycle();
+                        root.recycle();
+                    } else if (step.has("x") && step.has("y")) {
+                        tapX = step.optInt("x");
+                        tapY = step.optInt("y");
+                    }
+                    b.tap(tapX, tapY);
                     result.put("found", searchTerm);
                     result.put("action", "tap");
-                    result.put("x", bounds.centerX());
-                    result.put("y", bounds.centerY());
+                    result.put("x", tapX);
+                    result.put("y", tapY);
                     break;
+                }
 
                 case "click":
                     b.clickNode(found);
@@ -271,6 +312,44 @@ public class FlowHandler implements RouteHandler {
                     result.put("action", "home");
                     break;
 
+                case "type": {
+                    String text = step.optString("text", "");
+                    if (text.isEmpty()) {
+                        result.put("error", "type requires text");
+                        break;
+                    }
+                    b.tap(bounds.centerX(), bounds.centerY());
+                    Thread.sleep(180);
+                    boolean typed = typeInto(b, found, text);
+                    result.put("found", searchTerm);
+                    result.put("action", "type");
+                    result.put("typed", typed);
+                    if (!typed) result.put("error", "could not type into the field");
+                    break;
+                }
+
+                case "scroll": {
+                    String direction = step.optString("direction", "down");
+                    android.util.DisplayMetrics dm = b.getResources().getDisplayMetrics();
+                    int cx = dm.widthPixels / 2;
+                    int cy = dm.heightPixels / 2;
+                    int travel = Math.min(dm.widthPixels, dm.heightPixels) / 4;
+                    boolean down = "down".equalsIgnoreCase(direction);
+                    boolean scrolled = b.swipe(cx, down ? cy + travel : cy - travel,
+                            cx, down ? cy - travel : cy + travel, 350);
+                    result.put("found", searchTerm);
+                    result.put("action", "scroll");
+                    result.put("direction", down ? "down" : "up");
+                    result.put("scrolled", scrolled);
+                    break;
+                }
+
+                case "recents":
+                    b.doGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_RECENTS);
+                    result.put("found", searchTerm);
+                    result.put("action", "recents");
+                    break;
+
                 case "none":
                     result.put("found", searchTerm);
                     result.put("action", "none");
@@ -288,5 +367,58 @@ public class FlowHandler implements RouteHandler {
 
         result.put("elapsedMs", elapsed);
         return result;
+    }
+
+    private JSONObject openTarget(AccessibilityBridge bridge, JSONObject step, String action, JSONObject result)
+            throws Exception {
+        Intent intent;
+        if ("deep_link".equalsIgnoreCase(action)) {
+            String uri = step.optString("uri", "");
+            if (uri.isEmpty()) {
+                result.put("error", "deep_link requires uri");
+                return result;
+            }
+            intent = new Intent(Intent.ACTION_VIEW, Uri.parse(uri));
+            result.put("action", "deep_link");
+            result.put("uri", uri);
+        } else {
+            String pkg = step.optString("package", "");
+            intent = bridge.getPackageManager().getLaunchIntentForPackage(pkg);
+            if (intent == null) {
+                result.put("error", "app not found: " + pkg);
+                return result;
+            }
+            result.put("action", "launch");
+            result.put("package", pkg);
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        bridge.startActivity(intent);
+        result.put("launched", true);
+        return result;
+    }
+
+    private boolean typeInto(AccessibilityBridge bridge, AccessibilityNodeInfo node, String text) {
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        Bundle setText = new Bundle();
+        setText.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setText)) return true;
+
+        // Some IME-backed fields reject ACTION_SET_TEXT. Paste through the
+        // focused editable node instead of silently reporting success.
+        try {
+            ClipboardManager clipboard =
+                    (ClipboardManager) bridge.getSystemService(Context.CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("talisman", text));
+            AccessibilityNodeInfo root = SafeA11y.getRootSafe(bridge, A11Y_TIMEOUT);
+            if (root == null) return false;
+            AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            boolean pasted = focused != null && focused.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+            if (focused != null) focused.recycle();
+            root.recycle();
+            return pasted;
+        } catch (Exception error) {
+            Log.w(TAG, "type fallback failed: " + error.getMessage());
+            return false;
+        }
     }
 }

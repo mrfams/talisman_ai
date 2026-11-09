@@ -897,14 +897,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
       ? `\n\nUser profile: timezone ${profile.timezone}; locale ${profile.locale}; display name ${profile.displayName ?? "unknown"}. Preferences: ${JSON.stringify(profile.preferences)}. Use the timezone when interpreting times and schedules.`
       : "";
     const phoneContext = companionDevice
-      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly: call phone_look first, then phone_tap_text, phone_type, phone_scroll, phone_back, phone_open_app, or phone_home. Do not use create_task for phone control. Those action tools only create an approval card; no action runs until the user presses Allow once. Work through the task step by step: after each approved action the client continues automatically, so read the screen again and take the next step. For a call, open the relevant app, search for the contact, open the conversation, then tap the call control. Never repeat an action that already succeeded. Never say a phone action succeeded until a tool returns an executed result.`
+      ? ` A paired Android phone named "${companionDevice.name}" is connected. For any phone request, use the phone tools directly; do not use create_task for phone control. For anything that needs more than one action (for example “open WhatsApp, find Sam, and send a greeting”), call phone_look only if you need the current labels, then call phone_plan ONCE with the whole sequence. Do not open the app as a separate action first, and never stop after opening it. A plan may contain up to 15 steps and supports launch, deep_link, tap_text, tap, type, scroll, global back/home/recents, and wait-only. Use wait_for text from the expected next screen before every tap, type, or scroll; launch may omit it. The approval card is the owner's todo list, approved once. After approval the plan result reports exactly which steps ran. Only say the task is complete when the plan result says every non-optional step succeeded; otherwise name the step that stopped and why. A typical WhatsApp send is: launch com.whatsapp, wait for Search and tap it, wait for the search field and type the contact, wait for the contact result and tap it, wait for the message field and type the greeting, wait for Send and tap it.`
       : "";
     const continuation =
       internal && body.context
         ? `\n\nInternal continuation after a phone approval (not a new user request): ${body.context}\nContinue the original request from the current phone screen. Do not repeat an action that already succeeded. If the requested result is complete, say so plainly.`
         : "";
     const messages = buildContext({
-      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look things up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive. When a phone path is already known, put up to six taps into phone_plan so the owner approves the whole plan once; use wait_for text so a changed screen stops the flow.${profileContext}${phoneContext}${continuation}`,
+      system: `You are Talisman, a personal AI agent. You can search the live web, read pages, create durable tasks, and control the paired Android phone. For questions and research you can answer now, use web_search and read_page and answer directly; do not create a task just to look things up. Use create_task only for a long multi-step job or a document. A created task starts immediately and returns its current result, so report that result instead of promising to follow up. Phone control must use the phone tools immediately, because each phone approval is one-shot and interactive. When a phone path is already known, put the entire task into one phone_plan (up to 15 steps) so the owner approves it once; every tap, type and scroll needs a wait_for anchor so a changed screen stops the whole flow.${profileContext}${phoneContext}${continuation}`,
       memories: relevantMemories,
       history: chatHistory,
       budgetTokens: 24_000,
@@ -1038,8 +1038,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       let assistantText = "";
       try {
         const result = await agent.run({
-          messages,
-          maxSteps: 6,
+          messages,            maxSteps: 8,
           signal: c.req.raw.signal,
           onEvent: async (event) => {
             if (event.type === "text_delta") {

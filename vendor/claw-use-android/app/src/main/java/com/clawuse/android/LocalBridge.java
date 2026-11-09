@@ -49,7 +49,9 @@ final class LocalBridge {
         HttpURLConnection connection = (HttpURLConnection) new URL(BASE + path).openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(3_000);
-        connection.setReadTimeout(25_000);
+        // A whole phone plan runs inside one /flow call, so this must outlast
+        // several guarded waits rather than a single tap.
+        connection.setReadTimeout(90_000);
         connection.setRequestProperty("x-bridge-token", token);
         connection.setRequestProperty("accept", "application/json");
         if (body != null) {

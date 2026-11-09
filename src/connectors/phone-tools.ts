@@ -65,6 +65,8 @@ export function phoneTools({
       .filter((box): box is Record<string, unknown> => Boolean(box));
   };
 
+  const MAX_PLAN_STEPS = 15;
+
   return [
     {
       definition: {
@@ -89,7 +91,7 @@ export function phoneTools({
       definition: {
         name: "phone_tap_text",
         description:
-          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Creates an approval card; the tap runs only after the user approves it.",
+          "Tap visible text on the phone screen. Finds the element by its label, so no coordinates are guessed. Creates an approval card; the tap runs only after the user approves it. For a task with more than one action, use phone_plan once instead of separate taps.",
         parameters: {
           type: "object",
           properties: {
@@ -124,7 +126,7 @@ export function phoneTools({
       definition: {
         name: "phone_type",
         description:
-          "Type into the focused field on the phone. Creates an approval card and must never be used for a password or one-time code.",
+          "Type into the focused field on the phone. Creates an approval card and must never be used for a password or one-time code. For a task with more than one action, use phone_plan once instead of separate actions.",
         parameters: {
           type: "object",
           properties: { text: { type: "string" } },
@@ -171,7 +173,7 @@ export function phoneTools({
       definition: {
         name: "phone_open_app",
         description:
-          "Open an app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it.",
+          "Open one app on the phone by name, for example “Messages” or “Maps”. Creates an approval card; the app opens only after the user approves it. Do not use this as the first step of a multi-step task; put the launch inside phone_plan so the whole task is approved and completed once.",
         parameters: {
           type: "object",
           properties: { name: { type: "string" } },
@@ -208,35 +210,56 @@ export function phoneTools({
       definition: {
         name: "phone_plan",
         description:
-          "Run a short sequence of taps on the phone under one approval. Call phone_look first. Each step can wait for visible text before tapping; if that text never appears, the flow stops instead of tapping blind. Use this for a known path such as opening a conversation and pressing a control. The user approves the whole exact plan once.",
+          "Run the whole phone task as one guarded plan under one approval. Use this instead of separate taps whenever the request needs more than one action. Up to 15 steps. Actions: launch an app, open a deep link, tap visible text, tap coordinates, type into a visible field, scroll, press back/home/recents, or wait only. Every step that taps, types or scrolls must include wait_for text/desc/id from the expected screen; if that anchor never appears the flow stops instead of acting blind. Launch may omit wait_for. Never put a password, PIN or one-time code in a plan. The plan itself is the owner's checklist: the user approves it once and the result reports which steps ran.",
         parameters: {
           type: "object",
           properties: {
             steps: {
               type: "array",
               minItems: 1,
-              maxItems: 6,
+              maxItems: 15,
               items: {
                 type: "object",
                 properties: {
                   wait_for: {
                     type: "object",
+                    description:
+                      "An anchor on the expected screen. Use text for visible text, desc for a content description such as WhatsApp's Search or Message buttons, or id for an Android resource id.",
                     properties: {
                       text: { type: "string", description: "Visible text to wait for" },
+                      desc: { type: "string", description: "Content description to wait for" },
+                      id: { type: "string", description: "Android view id to wait for" },
                       timeout_ms: { type: "number", description: "Up to 15000; defaults to 8000" },
                     },
-                    required: ["text"],
                   },
                   then: {
                     type: "object",
                     description:
-                      "The action to run after the wait: tap_text, tap, global back/home, or none.",
+                      "The action to run after the wait: launch, deep_link, tap_text, tap, type, scroll, global back/home/recents, or none.",
                     properties: {
-                      action: { type: "string", enum: ["tap_text", "tap", "global", "none"] },
+                      action: {
+                        type: "string",
+                        enum: [
+                          "launch",
+                          "deep_link",
+                          "tap_text",
+                          "tap",
+                          "type",
+                          "scroll",
+                          "global",
+                          "none",
+                        ],
+                      },
+                      package: { type: "string", description: "Package for launch" },
+                      uri: { type: "string", description: "URI for deep_link" },
                       text: { type: "string" },
+                      direction: { type: "string", enum: ["up", "down"] },
                       x: { type: "number" },
                       y: { type: "number" },
-                      name: { type: "string", enum: ["back", "home"] },
+                      name: {
+                        type: "string",
+                        enum: ["back", "home", "recents"],
+                      },
                     },
                     required: ["action"],
                   },
@@ -252,10 +275,12 @@ export function phoneTools({
       execute: async (args) => {
         const raw = Array.isArray(args.steps) ? args.steps : [];
         if (raw.length === 0) return { error: "steps is required" };
-        if (raw.length > 6) return { error: "A phone plan can have at most 6 steps" };
+        if (raw.length > MAX_PLAN_STEPS) {
+          return { error: `A phone plan can have at most ${MAX_PLAN_STEPS} steps` };
+        }
         const steps: Array<Record<string, unknown>> = [];
         const preview: string[] = [];
-        for (const entry of raw.slice(0, 6)) {
+        for (const entry of raw.slice(0, MAX_PLAN_STEPS)) {
           if (!entry || typeof entry !== "object") return { error: "Each step must be an object" };
           const step = entry as Record<string, unknown>;
           const then = step.then;
@@ -266,22 +291,37 @@ export function phoneTools({
             step.wait_for && typeof step.wait_for === "object"
               ? (step.wait_for as Record<string, unknown>)
               : null;
-          const normalizedWait = wait
-            ? {
-                text: String(wait.text ?? "").trim().slice(0, 120),
-                timeout_ms: Math.min(15_000, Math.max(1_000, Number(wait.timeout_ms ?? 8_000))),
-              }
-            : null;
-          if (normalizedWait && !normalizedWait.text) return { error: "wait_for.text is required" };
-          if (!normalizedWait && action !== "none") {
+          const waitText = String(wait?.text ?? "").trim().slice(0, 120);
+          const waitDesc = String(wait?.desc ?? "").trim().slice(0, 120);
+          const waitId = String(wait?.id ?? "").trim().slice(0, 160);
+          const normalizedWait =
+            wait && (waitText || waitDesc || waitId)
+              ? {
+                  ...(waitText ? { text: waitText } : {}),
+                  ...(waitDesc ? { desc: waitDesc } : {}),
+                  ...(waitId ? { id: waitId } : {}),
+                  timeout_ms: Math.min(15_000, Math.max(1_000, Number(wait.timeout_ms ?? 8_000))),
+                }
+              : null;
+          if (wait && !normalizedWait) return { error: "wait_for needs text, desc, or id" };
+          const needsWait = action !== "launch" && action !== "deep_link";
+          if (needsWait && !normalizedWait) {
             return {
               error:
-                "Every plan step needs wait_for text so a changed screen stops the flow instead of tapping blind",
+                "Every plan step that taps, types or scrolls needs a wait_for anchor so a changed screen stops the flow instead of acting blind",
             };
           }
 
           let normalizedThen: Record<string, unknown>;
-          if (action === "tap_text") {
+          if (action === "launch") {
+            const pkg = String(source.package ?? "").trim().slice(0, 200);
+            if (!pkg) return { error: "launch needs package" };
+            normalizedThen = { action, package: pkg };
+          } else if (action === "deep_link") {
+            const uri = String(source.uri ?? "").trim().slice(0, 2_000);
+            if (!uri) return { error: "deep_link needs uri" };
+            normalizedThen = { action, uri };
+          } else if (action === "tap_text") {
             const text = String(source.text ?? "").trim().slice(0, 120);
             if (!text) return { error: "tap_text needs text" };
             normalizedThen = { action, text };
@@ -290,9 +330,21 @@ export function phoneTools({
             const y = Number(source.y);
             if (!Number.isFinite(x) || !Number.isFinite(y)) return { error: "tap needs x and y" };
             normalizedThen = { action, x: Math.round(x), y: Math.round(y) };
+          } else if (action === "type") {
+            const text = String(source.text ?? "").slice(0, 2_000);
+            if (!text) return { error: "type needs text" };
+            normalizedThen = { action, text };
+          } else if (action === "scroll") {
+            const direction = String(source.direction ?? "down").toLowerCase();
+            if (direction !== "up" && direction !== "down") {
+              return { error: "scroll must be up or down" };
+            }
+            normalizedThen = { action, direction };
           } else if (action === "global") {
             const name = String(source.name ?? "").toLowerCase();
-            if (name !== "back" && name !== "home") return { error: "global must be back or home" };
+            if (name !== "back" && name !== "home" && name !== "recents") {
+              return { error: "global must be back, home or recents" };
+            }
             normalizedThen = { action, name };
           } else if (action === "none") {
             normalizedThen = { action };
@@ -304,20 +356,33 @@ export function phoneTools({
           if (normalizedWait) normalized.wait_for = normalizedWait;
           if (step.optional === true) normalized.optional = true;
           steps.push(normalized);
-          preview.push(
-            `${normalizedWait ? `wait for “${normalizedWait.text}” then ` : ""}${
-              action === "tap_text"
-                ? `tap “${String(normalizedThen.text)}”`
-                : action === "tap"
-                  ? `tap (${String(normalizedThen.x)}, ${String(normalizedThen.y)})`
-                  : action === "global"
-                    ? `press ${String(normalizedThen.name)}`
-                    : "continue"
-            }`,
-          );
+          const label =
+            action === "launch"
+              ? `open ${String(normalizedThen.package)}`
+              : action === "deep_link"
+                ? `open ${String(normalizedThen.uri)}`
+                : action === "tap_text"
+                  ? `tap “${String(normalizedThen.text)}”`
+                  : action === "tap"
+                    ? `tap (${String(normalizedThen.x)}, ${String(normalizedThen.y)})`
+                    : action === "type"
+                      ? `type “${String(normalizedThen.text).slice(0, 80)}”`
+                      : action === "scroll"
+                        ? `scroll ${String(normalizedThen.direction)}`
+                        : action === "global"
+                          ? `press ${String(normalizedThen.name)}`
+                          : "wait only";
+          const anchor = normalizedWait
+            ? normalizedWait.text
+              ? `“${normalizedWait.text}”`
+              : normalizedWait.desc
+                ? `description “${normalizedWait.desc}”`
+                : `id ${normalizedWait.id}`
+            : "";
+          preview.push(`${normalizedWait ? `wait for ${anchor} then ` : ""}${label}`);
         }
         const result = await approval("flow", { steps });
-        return { ...result, plan: preview };
+        return { ...result, plan: preview, step_count: steps.length };
       },
     },
   ];

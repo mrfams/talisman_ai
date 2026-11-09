@@ -13,6 +13,87 @@ interface RunInfo {
   progress: number;
 }
 
+interface PlanStepState {
+  title: string;
+  status: "done" | "failed" | "skipped" | "pending";
+  detail?: string;
+}
+
+interface PhonePlanRun {
+  id: string;
+  summary: string;
+  steps: PlanStepState[];
+  completed: boolean | null;
+}
+
+interface FlowExecution {
+  completed: boolean;
+  results: Array<Record<string, unknown>>;
+}
+
+/** The companion wraps a flow result once inside { ok, action, result }. */
+function flowExecution(raw: unknown): FlowExecution | null {
+  if (!raw || typeof raw !== "object") return null;
+  const outer = raw as Record<string, unknown>;
+  const inner =
+    outer.result && typeof outer.result === "object"
+      ? (outer.result as Record<string, unknown>)
+      : outer;
+  if (typeof inner.completed !== "boolean") return null;
+  return {
+    completed: inner.completed,
+    results: Array.isArray(inner.results)
+      ? inner.results.filter(
+          (row): row is Record<string, unknown> => Boolean(row) && typeof row === "object",
+        )
+      : [],
+  };
+}
+
+function planRun(
+  id: string,
+  summary: string,
+  plan: string[],
+  execution: FlowExecution | null,
+  commandStatus: string | null,
+): PhonePlanRun {
+  const rows = execution?.results ?? [];
+  const steps: PlanStepState[] = plan.map((title, index) => {
+    const row =
+      rows.find((entry) => Number(entry.step) === index) ?? rows[index];
+    if (!row) {
+      return { title, status: execution?.completed ? "done" : "pending" };
+    }
+    if (typeof row.error === "string" && row.error) {
+      return { title, status: "failed", detail: row.error };
+    }
+    if (row.skipped === true) {
+      return {
+        title,
+        status: "skipped",
+        detail: typeof row.reason === "string" ? row.reason : "optional step skipped",
+      };
+    }
+    return {
+      title,
+      status: "done",
+      detail: typeof row.found === "string" ? `found “${row.found}”` : undefined,
+    };
+  });
+  return {
+    id,
+    summary,
+    steps,
+    completed: execution
+      ? execution.completed
+      : commandStatus === "done"
+        ? true
+        : commandStatus === "error"
+          ? false
+          : null,
+  };
+}
+
 const OPENERS = [
   "Research a company and write a one-page brief",
   "Plan my week from my calendar",
@@ -40,6 +121,7 @@ export function Chat() {
   const [tools, setTools] = useState<{ name: string; phase: "start" | "end" }[]>([]);
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [phoneApprovals, setPhoneApprovals] = useState<PhoneApproval[]>([]);
+  const [phonePlanRuns, setPhonePlanRuns] = useState<PhonePlanRun[]>([]);
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [approvalNote, setApprovalNote] = useState<{
     tone: "neutral" | "warn" | "bad";
@@ -83,10 +165,10 @@ export function Chat() {
   ) {
     const body = text.trim();
     if (!body || streaming.current) return;
-    if (options.internal && phoneTurns.current >= 8) {
+    if (options.internal && phoneTurns.current >= 12) {
       setApprovalNote({
         tone: "warn",
-        text: "The phone task paused after 8 steps. Ask me to continue when you are ready.",
+        text: "The phone task paused after 12 steps. Ask me to continue when you are ready.",
       });
       return;
     }
@@ -101,6 +183,7 @@ export function Chat() {
       setDraft("");
       setPending(body);
       setPhoneApprovals([]);
+      setPhonePlanRuns([]);
       setApprovalNote(null);
     }
     setLiveText("");
@@ -186,39 +269,79 @@ export function Chat() {
   }
 
   async function decidePhoneApproval(id: string, decision: "approved" | "denied") {
-    const summary = phoneApprovals.find((item) => item.id === id)?.summary ?? "phone action";
+    const approval = phoneApprovals.find((item) => item.id === id);
+    const summary = approval?.summary ?? "phone action";
+    const plan = approval?.plan ?? [];
     setApprovalBusy(id);
     setApprovalNote(null);
+    // Put the checklist on screen as soon as the plan is allowed, so the owner
+    // watches the same todo list the phone is executing.
+    if (decision === "approved" && plan.length) {
+      setPhonePlanRuns((current) => [
+        ...current.filter((run) => run.id !== id),
+        planRun(id, summary, plan, null, null),
+      ]);
+    }
     try {
       const result = await api.decidePhoneApproval(id, decision);
       setPhoneApprovals((current) => current.filter((item) => item.id !== id));
       if (decision === "denied") {
+        setPhonePlanRuns((current) => current.filter((run) => run.id !== id));
         setApprovalNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
         return;
       }
 
+      const execution = flowExecution(result.command?.result);
+      if (plan.length) {
+        setPhonePlanRuns((current) => [
+          ...current.filter((run) => run.id !== id),
+          planRun(id, summary, plan, execution, result.command?.status ?? null),
+        ]);
+      }
+
+      const failedIndex = execution
+        ? execution.results.findIndex((row) => typeof row.error === "string" && row.error)
+        : -1;
       let outcome: string;
-      if (result.command?.status === "done") {
+      if (execution) {
+        outcome = execution.completed
+          ? `The approved plan completed every one of its ${execution.results.length} steps on the phone.`
+          : failedIndex >= 0
+            ? `The approved plan stopped at step ${failedIndex + 1}: ${String(execution.results[failedIndex]?.error ?? "failed")}.`
+            : "The approved plan did not complete.";
+      } else if (result.command?.status === "done") {
         outcome = `The approved action completed on the phone: ${summary}.`;
-        setApprovalNote({ tone: "neutral", text: "Approved and completed on the phone." });
       } else if (result.command?.status === "error") {
         outcome = `The approved action failed on the phone: ${result.command.error ?? "unknown error"}.`;
+      } else {
+        outcome = `The approved action was queued but the phone has not confirmed it yet: ${summary}.`;
+      }
+
+      if (execution) {
+        setApprovalNote({
+          tone: execution.completed ? "neutral" : "bad",
+          text: execution.completed
+            ? "Task complete — the phone ran every step in the plan."
+            : `The plan stopped. ${outcome}`,
+        });
+      } else if (result.command?.status === "error") {
         setApprovalNote({
           tone: "bad",
           text: `Approved, but the phone returned an error: ${result.command.error ?? "unknown"}`,
         });
+      } else if (result.command?.status === "done") {
+        setApprovalNote({ tone: "neutral", text: "Approved and completed on the phone." });
       } else {
-        outcome = `The approved action was queued but the phone has not confirmed it yet: ${summary}.`;
         setApprovalNote({
           tone: "warn",
-          text: "Approved and queued. Reading the phone screen again…",
+          text: "Approved and queued. The phone is still working through the plan…",
         });
       }
 
       if (result.command) {
         await send("Continue the phone task from the current screen.", {
           internal: true,
-          context: `${outcome} Continue the original phone request. Do not repeat the action that just ran; read the screen first and take the next step, or say the task is done.`,
+          context: `${outcome} Continue the original phone request. If the plan completed every step, verify the final screen and say the task is complete. If it stopped, do not repeat finished steps; take only the remaining step or report exactly where it stopped.`,
         });
       }
     } catch (error) {
@@ -486,7 +609,7 @@ export function Chat() {
                           </ol>
                         ) : null}
                         <div className="tiny faint" style={{ marginTop: 3 }}>
-                          Phone approval · one action only · expires{" "}
+                          Phone approval · one approval covers the whole plan · expires{" "}
                           {new Date(approval.expiresAt).toLocaleTimeString([], {
                             hour: "2-digit",
                             minute: "2-digit",
@@ -515,6 +638,62 @@ export function Chat() {
                     </div>
                   </div>
                 ))}
+              </div>
+            ) : null}
+
+            {phonePlanRuns.length ? (
+              <div className="stack" style={{ gap: 8, paddingLeft: 34 }}>
+                {phonePlanRuns.map((run) => {
+                  const failed = run.steps.findIndex((step) => step.status === "failed");
+                  return (
+                    <div key={run.id} className="panel" style={{ padding: 12 }}>
+                      <div className="small" style={{ fontWeight: 600 }}>
+                        {run.summary}
+                      </div>
+                      <ol className="plan-list plan-checklist">
+                        {run.steps.map((step, index) => (
+                          <li key={`${run.id}-${index}`} data-state={step.status}>
+                            <span className="plan-state" aria-hidden>
+                              {step.status === "done" ? (
+                                <Check size={11} />
+                              ) : step.status === "failed" ? (
+                                <X size={11} />
+                              ) : step.status === "skipped" ? (
+                                "–"
+                              ) : (
+                                "·"
+                              )}
+                            </span>
+                            <span>{step.title}</span>
+                            {step.detail ? (
+                              <span className="tiny faint"> {step.detail}</span>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ol>
+                      <div
+                        className="tiny"
+                        style={{
+                          marginTop: 6,
+                          color:
+                            run.completed === true
+                              ? "var(--ok)"
+                              : run.completed === false
+                                ? "var(--bad)"
+                                : "var(--muted)",
+                        }}
+                      >
+                        {run.completed === true
+                          ? "Task complete — every step ran."
+                          : run.completed === false
+                            ? failed >= 0
+                              ? `Stopped at step ${failed + 1}: ${run.steps[failed]?.detail ?? "failed"}`
+                              : "The plan did not complete."
+                            : "Running on the phone…"}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             ) : null}
 

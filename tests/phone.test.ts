@@ -205,6 +205,33 @@ test("phone tools ask for approval before they touch the phone", async () => {
   });
   assert.match(planned.plan[0] ?? "", /tap “Send”/);
 
+  const entireTask = (await plan.execute(
+    {
+      steps: [
+        { then: { action: "launch", package: "com.whatsapp" } },
+        { wait_for: { desc: "Search" }, then: { action: "tap_text", text: "Search" } },
+        { wait_for: { text: "Search" }, then: { action: "type", text: "Sam" } },
+        { wait_for: { text: "Sam" }, then: { action: "tap_text", text: "Sam" } },
+        { wait_for: { desc: "Message" }, then: { action: "type", text: "Hello!" } },
+        { wait_for: { desc: "Send" }, then: { action: "tap_text", text: "Send" } },
+      ],
+    },
+    { signal: new AbortController().signal, callId: "call-plan-full" },
+  )) as { status: string; plan: string[]; step_count: number };
+  assert.equal(entireTask.status, "approval_required");
+  assert.equal(entireTask.step_count, 6);
+  assert.match(entireTask.plan[0] ?? "", /open com\.whatsapp/);
+  assert.match(entireTask.plan[2] ?? "", /type “Sam”/);
+  assert.equal(requested[2]?.op, "flow");
+  assert.deepEqual((requested[2]?.args as { steps: unknown[] }).steps, [
+    { then: { action: "launch", package: "com.whatsapp" } },
+    { wait_for: { desc: "Search", timeout_ms: 8_000 }, then: { action: "tap_text", text: "Search" } },
+    { wait_for: { text: "Search", timeout_ms: 8_000 }, then: { action: "type", text: "Sam" } },
+    { wait_for: { text: "Sam", timeout_ms: 8_000 }, then: { action: "tap_text", text: "Sam" } },
+    { wait_for: { desc: "Message", timeout_ms: 8_000 }, then: { action: "type", text: "Hello!" } },
+    { wait_for: { desc: "Send", timeout_ms: 8_000 }, then: { action: "tap_text", text: "Send" } },
+  ]);
+
   const unguarded = (await plan.execute(
     { steps: [{ then: { action: "global", name: "back" } }] },
     { signal: new AbortController().signal, callId: "call-plan-2" },

@@ -342,13 +342,50 @@ public class TalismanAgentService extends Service {
             }
             String action = then.optString("action", "tap_text");
             switch (action) {
+                case "launch": {
+                    String pkg = then.optString("package", "");
+                    SafetyPolicy.requirePackage(pkg);
+                    out.put("then", "launch");
+                    out.put("package", pkg);
+                    break;
+                }
+                case "deep_link": {
+                    String uri = then.optString("uri", "");
+                    SafetyPolicy.requireSafeUri(uri);
+                    out.put("then", "deep_link");
+                    out.put("uri", uri);
+                    break;
+                }
                 case "tap_text":
+                    out.put("then", "tap");
+                    out.put("target", then.optString("text", ""));
+                    break;
                 case "tap":
                     out.put("then", "tap");
+                    if (then.has("x") && then.has("y")) {
+                        out.put("x", then.optInt("x"));
+                        out.put("y", then.optInt("y"));
+                    }
                     break;
+                case "type": {
+                    String text = then.optString("text", "");
+                    if (text.isEmpty()) throw new AgentFailure("invalid_flow");
+                    out.put("then", "type");
+                    out.put("text", text);
+                    break;
+                }
+                case "scroll": {
+                    String direction = then.optString("direction", "down");
+                    if (!direction.equals("up") && !direction.equals("down")) {
+                        throw new AgentFailure("unsupported_step");
+                    }
+                    out.put("then", "scroll");
+                    out.put("direction", direction);
+                    break;
+                }
                 case "global": {
                     String name = then.optString("name", "back");
-                    if (!name.equals("back") && !name.equals("home")) {
+                    if (!name.equals("back") && !name.equals("home") && !name.equals("recents")) {
                         throw new AgentFailure("unsupported_step");
                     }
                     out.put("then", name);
@@ -361,6 +398,7 @@ public class TalismanAgentService extends Service {
                     throw new AgentFailure("unsupported_step");
             }
             if (step.optBoolean("optional", false)) out.put("optional", true);
+            if (step.has("pauseMs")) out.put("pauseMs", step.optInt("pauseMs", 500));
             translated.put(out);
         }
         body.put("steps", translated);

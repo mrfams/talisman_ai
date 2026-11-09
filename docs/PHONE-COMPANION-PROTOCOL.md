@@ -290,17 +290,44 @@ Args:
 ```json
 {
   "steps": [
+    { "then": { "action": "launch", "package": "com.whatsapp" } },
     {
-      "wait_for": { "text": "Send", "timeout_ms": 8000 },
-      "then": { "action": "tap_text", "text": "Send" },
-      "optional": false
+      "wait_for": { "desc": "Search", "timeout_ms": 8000 },
+      "then": { "action": "tap_text", "text": "Search" }
+    },
+    {
+      "wait_for": { "text": "Search" },
+      "then": { "action": "type", "text": "Sam" }
+    },
+    {
+      "wait_for": { "text": "Sam" },
+      "then": { "action": "tap_text", "text": "Sam" }
+    },
+    {
+      "wait_for": { "desc": "Message" },
+      "then": { "action": "type", "text": "Hello!" }
+    },
+    {
+      "wait_for": { "desc": "Send" },
+      "then": { "action": "tap_text", "text": "Send" }
     }
   ]
 }
 ```
 
-The current Android translation supports `tap_text`/`tap`, `global` (`back`/`home`), and `none`.
-Unsupported steps fail with `unsupported_step`. The first non-optional failure stops the flow.
+`wait_for` may carry `text`, `desc` (content description) or `id` (Android view id), plus an
+optional `timeout_ms`. The Android translation supports:
+
+- `launch` (`package`) and `deep_link` (`uri`), which need no wait;
+- `tap_text` (`text`), which waits for the anchor and then taps the requested label;
+- `tap` (`x`, `y`), which taps exact coordinates after the anchor appears;
+- `type` (`text`), which focuses the anchor and types into the visible field;
+- `scroll` (`direction`: `up`/`down`);
+- `global` (`back`/`home`/`recents`) and `none` (wait-only verification).
+
+Unsupported steps fail with `unsupported_step`. The first non-optional failure stops the flow,
+and the result lists each step's outcome so the caller can show a checklist and report exactly
+where it stopped.
 
 ### `apps`
 

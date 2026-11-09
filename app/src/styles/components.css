@@ -2741,6 +2741,33 @@ a.pulse-item:hover {
   margin-top: 2px;
 }
 
+.plan-checklist li {
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: -14px;
+}
+
+.plan-checklist li[data-state="done"] .plan-state {
+  color: var(--ok);
+}
+
+.plan-checklist li[data-state="failed"] .plan-state {
+  color: var(--bad);
+}
+
+.plan-checklist li[data-state="skipped"] {
+  opacity: 0.65;
+}
+
+.plan-state {
+  display: inline-flex;
+  width: 12px;
+  justify-content: center;
+  color: var(--muted);
+}
+
 /* -------------------------------------------------------------- memory */
 .memory-list {
   display: flex;

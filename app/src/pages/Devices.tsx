@@ -88,10 +88,13 @@ function planPreview(approval: PhoneApproval): string[] {
     .map((entry) => {
       if (!entry || typeof entry !== "object") return "";
       const step = entry as Record<string, unknown>;
-      const wait =
+      const waitFor =
         step.wait_for && typeof step.wait_for === "object"
-          ? String((step.wait_for as Record<string, unknown>).text ?? "").trim()
-          : "";
+          ? (step.wait_for as Record<string, unknown>)
+          : null;
+      const wait = waitFor
+        ? String(waitFor.text ?? waitFor.desc ?? waitFor.id ?? "").trim()
+        : "";
       const then =
         step.then && typeof step.then === "object"
           ? (step.then as Record<string, unknown>)
@@ -99,15 +102,23 @@ function planPreview(approval: PhoneApproval): string[] {
       if (!then) return "";
       const action = String(then.action ?? "");
       const label =
-        action === "tap_text"
-          ? `tap “${String(then.text ?? "")}”`
-          : action === "tap"
-            ? `tap (${String(then.x ?? 0)}, ${String(then.y ?? 0)})`
-            : action === "global"
-              ? `press ${String(then.name ?? "")}`
-              : action === "none"
-                ? "continue"
-                : action;
+        action === "launch"
+          ? `open ${String(then.package ?? "app")}`
+          : action === "deep_link"
+            ? `open ${String(then.uri ?? "link")}`
+            : action === "tap_text"
+              ? `tap “${String(then.text ?? "")}”`
+              : action === "tap"
+                ? `tap (${String(then.x ?? 0)}, ${String(then.y ?? 0)})`
+                : action === "type"
+                  ? `type “${String(then.text ?? "").slice(0, 80)}”`
+                  : action === "scroll"
+                    ? `scroll ${String(then.direction ?? "down")}`
+                    : action === "global"
+                      ? `press ${String(then.name ?? "")}`
+                      : action === "none"
+                        ? "wait only"
+                        : action;
       return `${wait ? `wait for “${wait}” then ` : ""}${label}`;
     })
     .filter(Boolean);
