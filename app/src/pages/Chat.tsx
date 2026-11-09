@@ -159,6 +159,7 @@ export function Chat() {
   const input = useRef<HTMLTextAreaElement | null>(null);
   const autoStarted = useRef(false);
   const phoneTurns = useRef(0);
+  const phoneTaskLive = useRef(false);
   const streaming = useRef(false);
   const streamSeq = useRef(0);
 
@@ -198,6 +199,9 @@ export function Chat() {
     }
     streaming.current = true;
     const streamId = ++streamSeq.current;
+    let phoneTaskActed = false;
+    let phoneTaskFinished = false;
+    let streamFailed = false;
     if (options.internal) phoneTurns.current += 1;
     else phoneTurns.current = 0;
 
@@ -231,6 +235,11 @@ export function Chat() {
           onText: (chunk) => setLiveText((current) => current + chunk),
           onTool: (event) => {
             setTools((current) => [...current, { name: event.name, phase: event.phase }]);
+            if (event.name === "phone_task_act") phoneTaskActed = true;
+            if (event.name === "phone_task_done") {
+              phoneTaskFinished = true;
+              phoneTaskLive.current = false;
+            }
             if (event.task) {
               const task = event.task;
               setRuns((current) => [
@@ -274,12 +283,16 @@ export function Chat() {
             ]);
           },
           onDone: () => undefined,
-          onError: (message) => setProblem(message),
+          onError: (message) => {
+            streamFailed = true;
+            setProblem(message);
+          },
         },
         controller.signal,
         { internal: options.internal, context: options.context },
       );
     } catch (error) {
+      streamFailed = true;
       if ((error as Error).name !== "AbortError") setProblem(errorMessage(error));
     } finally {
       // A stopped or superseded stream must not clear the state of the request
@@ -297,6 +310,28 @@ export function Chat() {
           setTools([]);
         }
         input.current?.focus();
+        // A task can outlive one model turn. Keep the same approved envelope
+        // moving until phone_task_done succeeds, without starting a new task.
+        if (
+          options.internal &&
+          phoneTaskLive.current &&
+          phoneTaskActed &&
+          !phoneTaskFinished &&
+          !streamFailed
+        ) {
+          if (phoneTurns.current >= 12) {
+            setApprovalNote({
+              tone: "warn",
+              text: "The phone task paused after 12 turns. Ask me to continue when you are ready.",
+            });
+          } else {
+            void send("Continue the approved phone task.", {
+              internal: true,
+              context:
+                "The approved phone task is still active. Read the live screen, take the next action, update the checklist, and continue until the goal is visibly complete or you are blocked. Do not repeat an action that already succeeded.",
+            });
+          }
+        }
       }
     }
   }
@@ -327,12 +362,14 @@ export function Chat() {
       const result = await api.decidePhoneApproval(id, decision);
       setPhoneApprovals((current) => current.filter((item) => item.id !== id));
       if (decision === "denied") {
+        phoneTaskLive.current = false;
         setPhonePlanRuns((current) => current.filter((run) => run.id !== id));
         setApprovalNote({ tone: "neutral", text: "Refused. Nothing was sent to the phone." });
         return;
       }
 
       if (result.task) {
+        phoneTaskLive.current = true;
         setPhonePlanRuns((current) => [
           ...current.filter((run) => run.id !== "phone-task-live"),
           {
@@ -686,6 +723,7 @@ export function Chat() {
                           variant="primary"
                           icon={<Check size={12} />}
                           busy={approvalBusy === approval.id}
+                          disabled={sending}
                           onClick={() => void decidePhoneApproval(approval.id, "approved")}
                         >
                           {approval.task ? "Allow task" : "Allow once"}
@@ -694,6 +732,7 @@ export function Chat() {
                           size="sm"
                           icon={<X size={12} />}
                           busy={approvalBusy === approval.id}
+                          disabled={sending}
                           onClick={() => void decidePhoneApproval(approval.id, "denied")}
                         >
                           Refuse
